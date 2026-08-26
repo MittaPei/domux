@@ -1,0 +1,248 @@
+{
+  "home_assistant": {
+    "auth": {
+      "issue_http": 200,
+      "refresh_after_revoke_http": 400,
+      "revoke_http": 200,
+      "token_type": "Bearer",
+      "ttl_seconds": 1800
+    },
+    "health": {
+      "authenticated_api_http": 200,
+      "message": "API running.",
+      "unauthenticated_api_http": 401
+    },
+    "onboarding": {
+      "final": {
+        "analytics": true,
+        "core_config": true,
+        "integration": true,
+        "user": true
+      },
+      "initial": {
+        "analytics": false,
+        "core_config": false,
+        "integration": false,
+        "user": false
+      },
+      "requests": {
+        "analytics_http": 200,
+        "core_config_http": 200,
+        "integration_http": 200,
+        "users_http": 200
+      }
+    },
+    "phases": {
+      "setup": {
+        "classification": "direct_rest_state_normalization",
+        "dispatches": [
+          {
+            "domain": "light",
+            "http": 200,
+            "service": "turn_on"
+          },
+          {
+            "domain": "cover",
+            "http": 200,
+            "service": "set_cover_position"
+          },
+          {
+            "domain": "climate",
+            "http": 200,
+            "service": "set_hvac_mode"
+          },
+          {
+            "domain": "climate",
+            "http": 200,
+            "service": "set_temperature"
+          }
+        ],
+        "included_in_sut_dispatch_count": false,
+        "purpose": "setup_only"
+      },
+      "sut": {
+        "adapter": "HomeAssistantRESTAdapter",
+        "cases": [
+          {
+            "case": "clarified_light_brightness",
+            "controlled_after": {
+              "brightness": 128,
+              "color_temp_kelvin": 3000,
+              "entity_id": "light.bed_light",
+              "rgb_color": [
+                255,
+                177,
+                110
+              ],
+              "state": "on"
+            },
+            "controlled_before": {
+              "brightness": 64,
+              "color_temp_kelvin": 3000,
+              "entity_id": "light.bed_light",
+              "rgb_color": [
+                255,
+                177,
+                110
+              ],
+              "state": "on"
+            },
+            "domain": "light",
+            "grounding": {
+              "candidate_ids": [
+                "light.bed_light",
+                "light.ceiling_lights"
+              ],
+              "clarification_required": true,
+              "resolution": "resolve_clarification_submission",
+              "selected_entity_id": "light.bed_light"
+            },
+            "postcondition": {
+              "all_registered_entities_exact": true,
+              "matched_prepared_projection": true,
+              "reason": "committed",
+              "status": "COMMITTED"
+            },
+            "replay": {
+              "accepted": false,
+              "dispatched": false,
+              "reason": "replayed_nonce",
+              "sut_dispatch_delta": 0
+            },
+            "service_shape": {
+              "data": {
+                "brightness_pct": 50.0,
+                "entity_id": "light.bed_light"
+              },
+              "domain": "light",
+              "service": "turn_on"
+            }
+          },
+          {
+            "case": "unique_cover_position",
+            "controlled_after": {
+              "current_position": 20,
+              "entity_id": "cover.hall_window",
+              "state": "open"
+            },
+            "controlled_before": {
+              "current_position": 10,
+              "entity_id": "cover.hall_window",
+              "state": "open"
+            },
+            "domain": "cover",
+            "grounding": {
+              "candidate_ids": [
+                "cover.hall_window"
+              ],
+              "clarification_required": false,
+              "resolution": "resolve_unique_request",
+              "selected_entity_id": "cover.hall_window"
+            },
+            "postcondition": {
+              "all_registered_entities_exact": true,
+              "matched_prepared_projection": true,
+              "reason": "committed",
+              "status": "COMMITTED"
+            },
+            "replay": {
+              "accepted": false,
+              "dispatched": false,
+              "reason": "replayed_nonce",
+              "sut_dispatch_delta": 0
+            },
+            "service_shape": {
+              "data": {
+                "entity_id": "cover.hall_window",
+                "position": 20
+              },
+              "domain": "cover",
+              "service": "set_cover_position"
+            }
+          },
+          {
+            "case": "unique_climate_temperature",
+            "controlled_after": {
+              "entity_id": "climate.hvac",
+              "fan_mode": "on_high",
+              "state": "cool",
+              "temperature": 23.0
+            },
+            "controlled_before": {
+              "entity_id": "climate.hvac",
+              "fan_mode": "on_high",
+              "state": "cool",
+              "temperature": 21
+            },
+            "domain": "climate",
+            "grounding": {
+              "candidate_ids": [
+                "climate.hvac"
+              ],
+              "clarification_required": false,
+              "resolution": "resolve_unique_request",
+              "selected_entity_id": "climate.hvac"
+            },
+            "postcondition": {
+              "all_registered_entities_exact": true,
+              "matched_prepared_projection": true,
+              "reason": "committed",
+              "status": "COMMITTED"
+            },
+            "replay": {
+              "accepted": false,
+              "dispatched": false,
+              "reason": "replayed_nonce",
+              "sut_dispatch_delta": 0
+            },
+            "service_shape": {
+              "data": {
+                "entity_id": "climate.hvac",
+                "temperature": 23.0
+              },
+              "domain": "climate",
+              "service": "set_temperature"
+            }
+          }
+        ],
+        "classification": "clarify_commit_sut",
+        "pipeline": [
+          "ground_domux_request",
+          "resolve_clarification_submission_or_unique",
+          "PreparedActionStore.prepare",
+          "PreparedActionStore.commit",
+          "HomeAssistantRESTAdapter.call_service"
+        ],
+        "sut_dispatch_total": 3
+      },
+      "teardown": {
+        "classification": "credential_cleanup",
+        "refresh_after_revoke_http": 400,
+        "refresh_revoke_http": 200
+      }
+    },
+    "readiness": {
+      "endpoint": "/api/onboarding",
+      "http": 200
+    }
+  },
+  "image": {
+    "architecture": "amd64",
+    "docker_healthcheck": false,
+    "manifest_digest": "sha256:8e9751cb66d3ba6624f5360a7d31b0c6821f7f5b3fb8ba0d10d58f0f481c540c",
+    "operating_system": "linux",
+    "repository": "ghcr.io/home-assistant/home-assistant",
+    "version": "2026.8.3"
+  },
+  "isolation": {
+    "container_count": 1,
+    "cpu_limit": 1.5,
+    "memory_limit_bytes": 2147483648,
+    "named_volume_count": 1,
+    "pids_limit": 512,
+    "random_loopback_binding": true,
+    "restart_policy": "no"
+  },
+  "schema_version": 1,
+  "status": "passed"
+}

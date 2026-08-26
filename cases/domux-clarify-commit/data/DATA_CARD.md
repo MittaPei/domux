@@ -3,8 +3,9 @@
 ## Summary
 
 This case uses 64 synthetic smart-home base scenarios. Sixteen records are a
-development split for implementation and smoke tests. Forty-eight records are a
-pre-frozen one-shot evaluation split, balanced across four ambiguity strata:
+development split for implementation and smoke tests. Forty-eight records form
+a fixed, policy-informed conformance split, balanced across four ambiguity
+strata:
 
 | Stratum | Development | Evaluation |
 |---|---:|---:|
@@ -20,8 +21,8 @@ statistical unit; the two commands are not treated as independent samples.
 
 ## Creation and freeze history
 
-The evaluation candidate was generated before the case implementation or any
-Domux output was inspected. Its original SHA-256 was
+The scenario candidate was drafted before the case implementation or any
+formal Domux output was inspected. Its original SHA-256 was
 `e81b7879760e6c15c5dcde0a516946e8baac68a15d3aeef3aa119b63e8eb5578`.
 Before any model run, a semantic review made eight declared changes only:
 
@@ -41,6 +42,13 @@ The resulting evaluation bytes were then frozen at SHA-256
 `freeze.json` also records the development and combined-file hashes. Any change
 to the evaluation bytes invalidates the formal run; failed or inconvenient rows
 remain in the denominator.
+
+The downstream grounding policy, evaluator, fixtures and regression tests were
+subsequently developed with the 48 scenario commands, structures and expected
+labels visible. This split is therefore **not an unseen holdout for the runtime
+policy**. The one-shot property applies only to the model raw-output evidence:
+after the code checkpoint is frozen, all 96 clear/ambiguous probes are generated
+once, without inspecting or selectively rerunning their outputs.
 
 The registered model artifact is independently pinned in
 `snapshot_manifest.json`: all thirteen root files, byte sizes, SHA-256 hashes,
@@ -84,9 +92,10 @@ The data measures whether a downstream integration:
   over-binding unrelated state.
 
 It is not a general Domux accuracy benchmark and it does not estimate ambiguity
-prevalence in household traffic. It must not be used to train, select a
-checkpoint, tune a rule, or repair the same evaluation version after results are
-seen.
+prevalence in household traffic. It is a deterministic conformance suite for
+this disclosed policy version. Once formal model inference begins, neither the
+model checkpoint nor the policy may be tuned against those raw outputs, and the
+same evidence version may not be selectively repaired or rerun.
 
 ## Safety and privacy
 
@@ -104,8 +113,13 @@ This does not change the licenses of Domux, Gemma, Home Assistant or any runtime
 ## Limitations
 
 - Forty-eight evaluation bases give wide confidence intervals, even for 48/48.
+- Wilson intervals and exact McNemar results describe outcomes on this fixed,
+  policy-informed suite only; they do not establish population generalization.
 - The 1:1 clear/ambiguous construction does not represent production prevalence,
   so measured precision is not a production positive predictive value.
+- A passing B2 quality gate means only that the predeclared clean and guard
+  checks passed on this suite; it is not a whole-model or production-safety
+  certification.
 - Clarification answers are controlled selections, not a user study or an ASR
   evaluation.
 - Synthetic entity names and state transitions cannot establish production
