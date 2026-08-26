@@ -90,7 +90,7 @@
     <text x="1346" y="238" class="sans pipeline-title">Commit once</text>
     <text x="1302" y="278" class="sans body">HA call + postcondition</text>
     <text x="1302" y="309" class="sans body">Nonce consumed once</text>
-    <text x="1302" y="344" class="sans small">Replay or drift: zero call</text>
+    <text x="1302" y="344" class="sans small">Replay/target drift: 0 calls</text>
   </g>
 
   <g filter="url(#shadow)">
