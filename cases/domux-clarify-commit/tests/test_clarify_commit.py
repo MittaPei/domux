@@ -842,6 +842,9 @@ class GroundingTests(unittest.TestCase):
             "Turn off the light, anything but a light in Study.",
             "Turn off a light, but don't use the light in Study.",
             "Turn off a light, but do not use my device in Study.",
+            "Turn off every light but Study.",
+            "Turn off every light, but Study.",
+            "Turn off every light (but Study).",
         ):
             with self.subTest(utterance=utterance):
                 grounded = ground_domux_request(
@@ -864,6 +867,1823 @@ class GroundingTests(unittest.TestCase):
                         ),
                         registry=registry,
                     )
+
+    def test_punctuated_and_anaphoric_negative_selectors_fail_closed(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        for utterance in (
+            'Turn off the light, but not "Study Lamp".',
+            "Turn off the light, but not (Study Lamp).",
+            "Turn off the light, but not: Study Lamp.",
+            "Turn off the light, but not the light that I mean, the one in Study.",
+            "Turn off the light, but do not use the lamp I mean, namely Study Lamp.",
+            "Turn off everything but Study Lamp.",
+            "Turn off every light but Study Lamp.",
+            "Turn off every light, but Study Lamp.",
+            "Turn off every light (but Study Lamp).",
+            "Turn off all lights but Study Lamp.",
+            "Turn off all the lights but Study Lamp.",
+            "Turn off all the lights, but Study Lamp.",
+            "Turn off any light but Study Lamp.",
+            "Turn off any one light but Study Lamp.",
+            "Turn off any of the lights but Study Lamp.",
+            "Turn off either light but Study Lamp.",
+            "Turn off each light but Study Lamp.",
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("light.living", "light.study"),
+                )
+                self.assertEqual(grounded.negated_entity_ids, ("light.study",))
+                self.assertTrue(grounded.clarification.required)
+                with self.assertRaises(GroundingError):
+                    resolve_unique_request(grounded, registry)
+
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    ttl_seconds=30,
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "negative-selector-nonce",
+                )
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Yes.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        for utterance in (
+            "Turn off nothing but Study Lamp.",
+            "Turn off no light but Study Lamp.",
+        ):
+            with self.subTest(only_target=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertEqual(grounded.negated_entity_ids, ())
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("light.study",),
+                )
+
+        corrected = ground_domux_request(
+            "Turn off not Study Lamp but Living Lamp.",
+            "turnOff|Light|*|*|*|Living Room|Ground Floor",
+            registry,
+        )
+        self.assertEqual(corrected.negated_entity_ids, ("light.study",))
+        resolved = resolve_clarification_submission(
+            corrected,
+            answer="Not Study Lamp; use Living Lamp.",
+            confirmed_instruction=DomuxInstruction(
+                "turnOff", "Light", "*", "*", "*", "Living Room", "Ground Floor"
+            ),
+            registry=registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "light.living")
+        adapter = InMemoryHAAdapter(states)
+        store = PreparedActionStore(
+            ttl_seconds=30,
+            clock=MutableClock(),
+            nonce_factory=lambda: "positive-contrast-nonce",
+        )
+        action = store.prepare(
+            actor_id="actor-a",
+            session_id="session-a",
+            grounded=corrected,
+            registry=registry,
+            adapter=adapter,
+            clarification_answer="Not Study Lamp; use Living Lamp.",
+            confirmed_instruction=DomuxInstruction(
+                "turnOff", "Light", "*", "*", "*", "Living Room", "Ground Floor"
+            ),
+        )
+        result = store.commit(action.confirmation(), registry=registry, adapter=adapter)
+        self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+        self.assertEqual(adapter.sut_calls[0]["data"]["entity_id"], "light.living")
+
+    def test_negative_selector_scope_resets_only_at_explicit_boundaries(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+            EntitySpec(
+                "light.utility", "light", "Light", "Utility Room", "Ground Floor",
+                aliases=("Utility Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed_living = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Living Room", "Ground Floor"
+        )
+        for utterance in (
+            "Do not use Study Lamp. Turn off Living Lamp.",
+            "Do not use Study Lamp; turn off Living Lamp.",
+            "Do not use Study Lamp, then turn off Living Lamp.",
+            "Do not use Study Lamp, turn off Living Lamp.",
+            "Do not use Study Lamp and then turn off Living Lamp.",
+            "Do not use Study Lamp: turn off Living Lamp.",
+            "Do not use Study Lamp—turn off Living Lamp.",
+            "Do not use, choose Study Lamp, then turn off Living Lamp.",
+            "Do not use, choose Study Lamp, turn off Living Lamp.",
+            "Do not use, choose Study Lamp: turn off Living Lamp.",
+            "Turn off not Study Lamp: use Living Lamp.",
+            "Turn off not Study Lamp—use Living Lamp.",
+        ):
+            with self.subTest(positive_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Living Room|Ground Floor",
+                    registry,
+                )
+                self.assertEqual(grounded.negated_entity_ids, ("light.study",))
+                self.assertNotIn(
+                    "light.living",
+                    grounded.negated_entity_ids,
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    ttl_seconds=30,
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "explicit-boundary-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer="Use Living Lamp.",
+                    confirmed_instruction=confirmed_living,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    "light.living",
+                )
+
+        for utterance in (
+            "Turn off any light but use Living Lamp.",
+            "Turn off any light, but use Living Lamp.",
+        ):
+            with self.subTest(direct_positive_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Living Room|Ground Floor",
+                    registry,
+                )
+                self.assertNotIn("light.living", grounded.negated_entity_ids)
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("light.living",),
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    ttl_seconds=30,
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "direct-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer="Use Living Lamp.",
+                    confirmed_instruction=confirmed_living,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    "light.living",
+                )
+
+        excluded_pair = ground_domux_request(
+            "Turn off Utility Lamp, but not Study Lamp or Living Lamp.",
+            "turnOff|Light|*|*|*|Utility Room|Ground Floor",
+            registry,
+        )
+        self.assertEqual(
+            excluded_pair.negated_entity_ids,
+            ("light.living", "light.study"),
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in excluded_pair.candidates),
+            ("light.utility",),
+        )
+
+        plain_and = ground_domux_request(
+            "Do not use Study Lamp and turn off Living Lamp.",
+            "turnOff|Light|*|*|*|Living Room|Ground Floor",
+            registry,
+        )
+        self.assertEqual(
+            plain_and.negated_entity_ids,
+            ("light.living", "light.study"),
+        )
+        adapter = InMemoryHAAdapter(states)
+        store = PreparedActionStore(
+            ttl_seconds=30,
+            clock=MutableClock(),
+            nonce_factory=lambda: "plain-and-negation-nonce",
+        )
+        with self.assertRaises(GroundingError):
+            store.prepare(
+                actor_id="actor-a",
+                session_id="session-a",
+                grounded=plain_and,
+                registry=registry,
+                adapter=adapter,
+                clarification_answer="Use Living Lamp.",
+                confirmed_instruction=confirmed_living,
+            )
+        self.assertEqual(adapter.sut_calls, [])
+
+    def test_entity_id_periods_do_not_terminate_negative_scope(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("climate.study", "climate", "AC", "Study", "Ground Floor"),
+            EntitySpec(
+                "climate.living", "climate", "AC", "Living Room", "Ground Floor"
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "cool",
+                "attributes": {
+                    "temperature": 24.0,
+                    "hvac_modes": ["off", "cool"],
+                    "fan_modes": ["low", "medium", "high"],
+                    "supported_features": 1,
+                    "temperature_unit": "°C",
+                    "min_temp": 16.0,
+                    "max_temp": 30.0,
+                    "target_temp_step": 0.5,
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "AC", "*", "*", "*", "Study", "Ground Floor"
+        )
+        for utterance in (
+            "Turn off the AC, but not climate.study.",
+            'Turn off the AC, but not "climate.study".',
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|AC|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("climate.living", "climate.study"),
+                )
+                self.assertIn("climate.study", grounded.negated_entity_ids)
+                self.assertTrue(grounded.clarification.required)
+                with self.assertRaises(GroundingError):
+                    resolve_clarification_submission(
+                        grounded,
+                        answer="Use climate.study.",
+                        confirmed_instruction=confirmed,
+                        registry=registry,
+                    )
+
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    ttl_seconds=30,
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "entity-id-negation-nonce",
+                )
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use climate.study.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        separate_sentence = ground_domux_request(
+            "Do not use climate.study. Turn off climate.living.",
+            "turnOff|AC|*|*|*|Living Room|Ground Floor",
+            registry,
+        )
+        self.assertEqual(separate_sentence.negated_entity_ids, ("climate.study",))
+        self.assertEqual(
+            tuple(entity.entity_id for entity in separate_sentence.candidates),
+            ("climate.living",),
+        )
+        adapter = InMemoryHAAdapter(states)
+        store = PreparedActionStore(
+            ttl_seconds=30,
+            clock=MutableClock(),
+            nonce_factory=lambda: "entity-id-sentence-boundary-nonce",
+        )
+        action = store.prepare(
+            actor_id="actor-a",
+            session_id="session-a",
+            grounded=separate_sentence,
+            registry=registry,
+            adapter=adapter,
+            clarification_answer="Use climate.living.",
+            confirmed_instruction=DomuxInstruction(
+                "turnOff", "AC", "*", "*", "*", "Living Room", "Ground Floor"
+            ),
+        )
+        result = store.commit(
+            action.confirmation(),
+            registry=registry,
+            adapter=adapter,
+        )
+        self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+        self.assertEqual(
+            adapter.sut_calls[0]["data"]["entity_id"],
+            "climate.living",
+        )
+
+    def test_coordinated_negative_actions_never_restart_authorization(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        for utterance in (
+            "Turn off the light but do not use, choose, or mean Study Lamp.",
+            "Turn off the light but do not use or choose Study Lamp.",
+            "Turn off the light but do not use and choose Study Lamp.",
+            "Turn off the light but do not use, select, choose, or mean Study Lamp.",
+            "Turn off the light but do not use, choose, or mean the Study Lamp.",
+            "Turn off the light but do not use, choose, or mean (Study Lamp).",
+            'Turn off the light but do not use, choose, or mean "Study Lamp".',
+            "Turn off the light but do not use, choose, or mean my Study Lamp.",
+            "Turn off the light but do not use choose Study Lamp.",
+            "Turn off the light but do not turn off, switch off, or close Study Lamp.",
+            "Turn off the light but do not turn off, switch off, or close the Study Lamp.",
+            "Turn off a light, but I don't want Study Lamp.",
+            "Turn off a light, but I don't need Study Lamp.",
+            "Turn off a light, but I don't have Study Lamp.",
+            "Turn off a light, but I don't want to use Study Lamp.",
+            "Turn off a light, but I don't need to use Study Lamp.",
+            "Turn off a light, but I don't want to choose Study Lamp.",
+            "Turn off a light, but I do not want Study Lamp.",
+            "Turn off a light, but I do not need to use Study Lamp.",
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                self.assertTrue(grounded.clarification.required)
+                with self.assertRaises(GroundingError):
+                    resolve_clarification_submission(
+                        grounded,
+                        answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                        registry=registry,
+                    )
+
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    ttl_seconds=30,
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "coordinated-negation-nonce",
+                )
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+    def test_negator_to_predicate_gaps_cannot_authorize_a_selector(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        negated = (
+            "Turn off a light, but do not: use Study Lamp.",
+            "Turn off a light, but don't: use Study Lamp.",
+            "Turn off a light, but do not—use Study Lamp.",
+            "Turn off a light, but do not, please, use Study Lamp.",
+            "Turn off a light, but do not use: choose Study Lamp.",
+            "Turn off a light, but I don't want to use, choose Study Lamp.",
+            "Turn off a light, but I don't want to use, choose, or mean Study Lamp.",
+            "Turn off a light, but I don't need to use, choose Study Lamp.",
+            "Turn off a light, but I do not want to use, choose Study Lamp.",
+            "Turn off a light, but do not, I am sure, use Study Lamp.",
+            "Turn off a light, but don't, would you, use Study Lamp.",
+            "Turn off a light, but do not, could you, use Study Lamp.",
+            "Turn off a light, but do not, can you, use Study Lamp.",
+            "Turn off a light, but do not, for me, use Study Lamp.",
+            "Turn off a light, but do not, around, use Study Lamp.",
+            "Turn off a light, but not!!! Study Lamp.",
+            "Turn off a light, but not... Study Lamp.",
+            "Turn off a light, but do not!!! use Study Lamp.",
+            "Turn off a light, but don't... use Study Lamp.",
+            "Turn off a light, but do not?! choose Study Lamp.",
+            "Turn off a light, but no! Study Lamp.",
+            "Turn off a light, but do not! use Study Lamp.",
+            "Turn off a light, but don't? choose Study Lamp.",
+            "Turn off a light, but not! use Study Lamp.",
+            "Turn off a light, but do not. use Study Lamp.",
+            "Do not! turn off the Study light.",
+            "Don't! turn off the Study light.",
+            "Do not. turn off the Study light.",
+            "Do not? turn off the Study light.",
+            "Do not! increase the Study light brightness by 10 percent.",
+            "Turn off a light, no, wait, Study Lamp.",
+            "Turn off a light, no, wait, use Study Lamp.",
+        )
+        for utterance in negated:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                self.assertTrue(grounded.clarification.required)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    ttl_seconds=30,
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "negator-gap-nonce",
+                )
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        for utterance in (
+            "Turn off a light, wait, Study Lamp.",
+            "Turn off a light, wait, use Study Lamp.",
+        ):
+            with self.subTest(suspensive_wait=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn(
+                    "negative_or_cancelled_intent",
+                    grounded.clarification.reasons,
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+    def test_generic_exclusions_cannot_be_laundered_by_clarification(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec(
+                "climate.living", "climate", "AC", "Living Room", "Ground Floor"
+            ),
+        ))
+        states = {
+            "light.study": {
+                "entity_id": "light.study",
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            },
+            "climate.living": {
+                "entity_id": "climate.living",
+                "state": "cool",
+                "attributes": {
+                    "temperature": 24.0,
+                    "hvac_modes": ["off", "cool"],
+                    "fan_modes": ["low", "medium", "high"],
+                    "supported_features": 1,
+                    "temperature_unit": "°C",
+                    "min_temp": 16.0,
+                    "max_temp": 30.0,
+                    "target_temp_step": 0.5,
+                },
+            },
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+
+        def assert_blocked(utterance: str, *, domain_exclusion: bool) -> None:
+            grounded = ground_domux_request(
+                utterance,
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                registry,
+            )
+            self.assertTrue(grounded.clarification.required)
+            if domain_exclusion:
+                self.assertIn("light.study", grounded.negated_entity_ids)
+            else:
+                self.assertIn(
+                    "unsupported_request_grammar",
+                    grounded.clarification.reasons,
+                )
+            adapter = InMemoryHAAdapter(states)
+            store = PreparedActionStore(
+                ttl_seconds=30,
+                clock=MutableClock(),
+                nonce_factory=lambda: "generic-exclusion-nonce",
+            )
+            with self.assertRaises(GroundingError):
+                store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer="Yes, use the Study light.",
+                    confirmed_instruction=confirmed,
+                )
+            self.assertEqual(adapter.sut_calls, [])
+
+        for utterance in (
+            "Turn off a device, but avoid the light.",
+            "Turn off a device, but use anything other than the light.",
+            "Turn off a device, but use anything besides the light.",
+            "Turn off a device, but use anything apart from the light.",
+            "Turn off a device instead of the light.",
+            "Turn off anything but the light.",
+            "Turn off a device without the light.",
+            "Turn off a device except for the light.",
+            "Turn off a device, but do not use any light.",
+        ):
+            with self.subTest(domain_exclusion=utterance):
+                assert_blocked(utterance, domain_exclusion=True)
+
+        for utterance in (
+            "Turn off a device, but avoid the device.",
+            "Turn off a device other than the device.",
+            "Turn off a device besides the device.",
+            "Turn off a device apart from the device.",
+            "Turn off a device instead of the device.",
+            "Turn off a device, but do not use anything.",
+            "Turn off a device, but do not use any device.",
+            "Turn off a device, but do not use a device.",
+            "Turn off a light. Do not use anything. Study.",
+        ):
+            with self.subTest(unresolved_generic=utterance):
+                assert_blocked(utterance, domain_exclusion=False)
+
+        # Double-negation/"only" semantics are deliberately outside the
+        # bounded grammar.  Fail closed even though the conservative parser
+        # records the named selector itself as negated.
+        double_negative = "Turn off a light, but don't use anything but Study."
+        grounded = ground_domux_request(
+            double_negative,
+            "turnOff|Light|*|*|*|Study|Ground Floor",
+            registry,
+        )
+        self.assertTrue(grounded.clarification.required)
+        self.assertIn("light.study", grounded.negated_entity_ids)
+        adapter = InMemoryHAAdapter(states)
+        store = PreparedActionStore(clock=MutableClock())
+        with self.assertRaises(GroundingError):
+            store.prepare(
+                actor_id="actor-a",
+                session_id="session-a",
+                grounded=grounded,
+                registry=registry,
+                adapter=adapter,
+                clarification_answer="Yes, use the Study light.",
+                confirmed_instruction=confirmed,
+            )
+        self.assertEqual(adapter.sut_calls, [])
+
+        specific_registry = EntityRegistry((
+            EntitySpec("light.right", "light", "Light", "Right", "Ground Floor"),
+            EntitySpec("light.left", "light", "Light", "Left", "Ground Floor"),
+        ))
+        specific_states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in specific_registry.entities
+        }
+        grounded = ground_domux_request(
+            "Do not use the light in Right, turn off the light in Left.",
+            "turnOff|Light|*|*|*|Left|Ground Floor",
+            specific_registry,
+        )
+        self.assertEqual(grounded.negated_entity_ids, ("light.right",))
+        adapter = InMemoryHAAdapter(specific_states)
+        store = PreparedActionStore(
+            clock=MutableClock(),
+            nonce_factory=lambda: "qualified-selector-nonce",
+        )
+        action = store.prepare(
+            actor_id="actor-a",
+            session_id="session-a",
+            grounded=grounded,
+            registry=specific_registry,
+            adapter=adapter,
+            clarification_answer="Use the light in Left.",
+            confirmed_instruction=DomuxInstruction(
+                "turnOff", "Light", "*", "*", "*", "Left", "Ground Floor"
+            ),
+        )
+        result = store.commit(
+            action.confirmation(),
+            registry=specific_registry,
+            adapter=adapter,
+        )
+        self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+        self.assertEqual(adapter.sut_calls[0]["data"]["entity_id"], "light.left")
+
+    def test_anaphoric_exclusions_bind_the_later_named_referent(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        utterances = (
+            "Turn off a light, but do not use that, but by that I mean Study Lamp.",
+            "Turn off a light, but do not use it, but by it I mean Study Lamp.",
+            (
+                "Turn off a light, but do not use the one that I mean, "
+                "but by that I mean Study Lamp."
+            ),
+            (
+                "Turn off a light, but do not use the light that I mean—"
+                "but by that I mean Study Lamp."
+            ),
+            (
+                "Turn off a light, but do not use it, "
+                "but by it, I mean Study Lamp."
+            ),
+            (
+                "Turn off a light, but do not use that, "
+                "but by that, I mean Study Lamp."
+            ),
+            (
+                "Turn off a light, but do not use this, "
+                "but by this— I mean Study Lamp."
+            ),
+            "Turn off a light, but do not use it; by it, I mean Study Lamp.",
+        )
+        for utterance in utterances:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                self.assertTrue(grounded.clarification.required)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "anaphoric-exclusion-nonce",
+                )
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+    def test_generic_withdrawals_block_but_complete_new_commands_restart_scope(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        withdrawals = (
+            "Turn off a light; I don't need any light.",
+            "Turn off a light; I don't want any light.",
+            "Turn off a light; I do not need the light.",
+            "Turn off a light; I do not want the light.",
+            "Turn off a light; no need for any light.",
+            "Turn off a light; I have no need for a light.",
+            "Turn off a light; I don't have any light.",
+            "Turn off a light; I would not use any light.",
+            "Turn off a light; I could not use any light.",
+            "Turn off a light; I can not use any light.",
+            "Turn off a light; I have no use for any light.",
+            "Turn off a light; I do not want to use any light.",
+            "Turn off a light; I don't need you to use any light.",
+            "Turn off a light; I do not want you to use the light.",
+            "Turn off a light; no need to use any light.",
+            "Turn off a light; no need to choose any light.",
+            "Turn off a light; no need to select any light.",
+            "Turn off a light; I need not use any light.",
+            "Turn off a light; we need not choose any light.",
+            "Turn off a light; you need not select any light.",
+            "Turn off a light; I want not to use any light.",
+            "Turn off a light; we want not to choose any light.",
+            "Turn off a light; I have no need to use any light.",
+            "Turn off a light; we have no need to choose any light.",
+            "Turn off a light; no use of any light.",
+            "Turn off a light; I have no use of any light.",
+            "Turn off a light; I want no use of any light.",
+        )
+        for utterance in withdrawals:
+            with self.subTest(withdrawal=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertIn(
+                    "negative_or_cancelled_intent",
+                    grounded.clarification.reasons,
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Turn off Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        explanatory_colon_withdrawals = (
+            "Don't do it: turn off Study Lamp.",
+            "Do not execute this: turn off Study Lamp.",
+            "Do not confirm this: turn off Study Lamp.",
+            "I don't want this: turn off Study Lamp.",
+            "I do not need it: turn off Study Lamp.",
+            "I have no need for this: turn off Study Lamp.",
+            "No need for this: turn off Study Lamp.",
+            "Avoid this: turn off Study Lamp.",
+        )
+        for utterance in explanatory_colon_withdrawals:
+            with self.subTest(explanatory_colon_withdrawal=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Turn off Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        target_only_restatements = (
+            "Turn off a light; I don't want any light, I mean Study Lamp.",
+            "Turn off a light; I don't need any light, I mean Study Lamp.",
+            "Turn off a light; I don't have any light, I mean Study Lamp.",
+            "Turn off a light; I would not use any light, I mean Study Lamp.",
+            "Turn off a light; no need for any light, I mean Study Lamp.",
+            "Turn off a light; I have no use for any light, I mean Study Lamp.",
+            "Do not turn off Living Lamp, I mean Study Lamp.",
+            "I don't want Living Lamp, I mean Study Lamp.",
+        )
+        for utterance in target_only_restatements:
+            with self.subTest(target_only_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn(
+                    "negative_or_cancelled_intent",
+                    grounded.clarification.reasons,
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        negative_state_restatements = (
+            (
+                "Turn off a light; do not use or move Living Lamp, "
+                "I mean Study Lamp."
+            ),
+            (
+                "Turn off a light; do not use and move Living Lamp, "
+                "I mean Study Lamp."
+            ),
+            (
+                "Turn off a light; do not use Living Lamp to move it, "
+                "I mean Study Lamp."
+            ),
+        )
+        for utterance in negative_state_restatements:
+            with self.subTest(negative_state_restatement=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        incomplete_restarts = (
+            "Turn off a light; I do not want any light; adjust Study Lamp.",
+            "Turn off a light; I do not want any light; move Study Lamp.",
+            "Turn off a light; I do not want any light; change Study Lamp.",
+            "Turn off a light; I do not want any light; make Study Lamp.",
+            "Turn off a light; I do not want any light; turn around Study Lamp.",
+            "Turn off a light; I do not want any light; turn to Study Lamp.",
+            "Turn off a light; I do not want any light; switch around Study Lamp.",
+        )
+        for utterance in incomplete_restarts:
+            with self.subTest(incomplete_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertIn("action", grounded.clarification.unresolved_slots)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Use Study Lamp.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        repaired_restart = ground_domux_request(
+            "Turn off a light; I do not want any light; adjust Study Lamp.",
+            "turnOff|Light|*|*|*|Study|Ground Floor",
+            registry,
+        )
+        adapter = InMemoryHAAdapter(states)
+        store = PreparedActionStore(
+            clock=MutableClock(),
+            nonce_factory=lambda: "repaired-restart-nonce",
+        )
+        action = store.prepare(
+            actor_id="actor-a",
+            session_id="session-a",
+            grounded=repaired_restart,
+            registry=registry,
+            adapter=adapter,
+            clarification_answer="Turn off Study Lamp.",
+            confirmed_instruction=confirmed,
+        )
+        result = store.commit(action.confirmation(), registry=registry, adapter=adapter)
+        self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+        self.assertEqual(adapter.sut_calls[0]["data"]["entity_id"], "light.study")
+
+        direct_generic_exclusions = (
+            "Turn off a light; I would not use any light.",
+            "Turn off a light; I could not use any light.",
+            "Turn off a light; I can not use any light.",
+            "Turn off a light; I do not want to use any light.",
+            "Turn off a light; I don't need you to use any light.",
+            "Turn off a light; I do not want you to use the light.",
+            "Turn off a light; no need to use any light.",
+            "Turn off a light; I need not choose any light.",
+            "Turn off a light; I want not to select any light.",
+            "Turn off a light; I have no need to choose any light.",
+            "Turn off a light; no use of any light.",
+            "Turn off a light; I want no use of any light.",
+        )
+        for utterance in direct_generic_exclusions:
+            with self.subTest(direct_generic_exclusion=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertEqual(
+                    grounded.negated_entity_ids,
+                    ("light.living", "light.study"),
+                )
+
+        positive_restarts = (
+            "Do not turn off Living Lamp; turn off Study Lamp.",
+            "Do not use Living Lamp: turn off Study Lamp.",
+            "Don't turn off Living Lamp, then turn off Study Lamp.",
+            "Never turn off Living Lamp. Turn off Study Lamp.",
+            "Do not switch off Living Lamp—but turn off Study Lamp.",
+            "I don't need any light; turn off Study Lamp.",
+            "I would not use any light. Turn off Study Lamp.",
+            "I have no use for any light—turn off Study Lamp.",
+            "I do not want any light; can you turn off Study Lamp?",
+            "I do not want any light; could you please turn off Study Lamp?",
+            "I do not want any light; would you turn off Study Lamp?",
+            "I do not want any light; will you turn off Study Lamp?",
+            "I do not want any light; I want you to turn off Study Lamp.",
+            "I do not want any light; I need you to turn off Study Lamp.",
+            "I do not want any light; can you just turn off Study Lamp?",
+            "I do not want any light; could you please just turn off Study Lamp?",
+            "I do not want any light; I want you to just turn off Study Lamp.",
+            "I do not want any light; I just want you to turn off Study Lamp.",
+            "I need not choose any light; turn off Study Lamp.",
+            "No use of any light; turn off Study Lamp.",
+            "I don't need any light; proceed to turn off Study Lamp.",
+            "I don't need any light; execute turn off Study Lamp.",
+            "Do not proceed; turn off Study Lamp.",
+            "Do not execute; turn off Study Lamp.",
+            "Do not confirm; turn off Study Lamp.",
+            "Do not proceed, then turn off Study Lamp.",
+            "Do not execute, then turn off Study Lamp.",
+            "Do not confirm, then turn off Study Lamp.",
+            "No need to use any light; turn off Study Lamp.",
+            "Anything but turn off Living Lamp; turn off Study Lamp.",
+            "Turn off any light but use Study Lamp.",
+            "Turn off any light, but use Study Lamp.",
+        )
+        for utterance in positive_restarts:
+            with self.subTest(positive_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertNotIn(
+                    "negative_or_cancelled_intent",
+                    grounded.clarification.reasons,
+                )
+                self.assertNotIn("light.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "positive-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer="Turn off Study Lamp.",
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    "light.study",
+                )
+
+    def test_selector_aware_positive_corrections_remain_executable(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        cases = (
+            (
+                "Turn off a light, do not use Living Lamp, I mean Study Lamp.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                "Use Study Lamp.",
+            ),
+            (
+                "Turn off a light, do not use Living Lamp, just use Study Lamp.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                "Use Study Lamp.",
+            ),
+            (
+                "Turn off a light, do not use Living Lamp, I choose Study Lamp.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                "Use Study Lamp.",
+            ),
+            (
+                "Turn off a light, do not use Living Lamp, Study Lamp instead.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                "Use Study Lamp.",
+            ),
+            (
+                "Turn off not Living Lamp: use Study Lamp.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                "Use Study Lamp.",
+            ),
+            (
+                "Turn off not Living Lamp—use Study Lamp.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+                "Use Study Lamp.",
+            ),
+            (
+                "Do not use Living Lamp, increase Study Lamp brightness by 10 percent.",
+                "adjustUp|Light|brightness|10|Percent|Study|Ground Floor",
+                "Increase Study Lamp brightness by 10 percent.",
+            ),
+            (
+                "Do not use Living Lamp, raise Study Lamp brightness by 10 percent.",
+                "adjustUp|Light|brightness|10|Percent|Study|Ground Floor",
+                "Raise Study Lamp brightness by 10 percent.",
+            ),
+            (
+                "Do not use Living Lamp, lower Study Lamp brightness by 10 percent.",
+                "adjustDown|Light|brightness|10|Percent|Study|Ground Floor",
+                "Lower Study Lamp brightness by 10 percent.",
+            ),
+            (
+                "Do not use Living Lamp, change Study Lamp brightness to 50 percent.",
+                "set|Light|brightness|50|Percent|Study|Ground Floor",
+                "Change Study Lamp brightness to 50 percent.",
+            ),
+        )
+        for utterance, raw_output, clarification_answer in cases:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(utterance, raw_output, registry)
+                self.assertEqual(grounded.negated_entity_ids, ("light.living",))
+                self.assertNotIn("light.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "selector-correction-nonce",
+                )
+                confirmed = parse_domux_output(raw_output)[0]
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer=clarification_answer,
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    "light.study",
+                )
+
+    def test_generic_domain_restart_requires_positive_domain_evidence(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.study", "light", "Light", "Study", "Ground Floor",
+                aliases=("Study Lamp",),
+            ),
+            EntitySpec(
+                "light.living", "light", "Light", "Living Room", "Ground Floor",
+                aliases=("Living Lamp",),
+            ),
+            EntitySpec(
+                "cover.study", "cover", "Curtain", "Study", "Ground Floor",
+                aliases=("Study Curtain",),
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on" if entity.domain == "light" else "open",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                } if entity.domain == "light" else {
+                    "current_position": 100,
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        blocked_restarts = (
+            (
+                "Turn off a device; I don't need any light; turn off.",
+                "turnOff|Light|*|*|*|*|*",
+            ),
+            (
+                "Turn off a device; I don't need any light; turn off a device.",
+                "turnOff|Light|*|*|*|*|*",
+            ),
+            (
+                "Turn off a device; I don't need any light; turn off Study.",
+                "turnOff|Light|*|*|*|Study|Ground Floor",
+            ),
+            *(
+                (
+                    f"Turn off a device; I don't need any light; "
+                    f"turn off a device {preposition} light.",
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                )
+                for preposition in (
+                    "about", "around", "at", "by", "for", "from", "in", "on", "to"
+                )
+            ),
+        )
+        for utterance, raw_output in blocked_restarts:
+            with self.subTest(blocked_restart=utterance):
+                grounded = ground_domux_request(utterance, raw_output, registry)
+                self.assertEqual(
+                    grounded.negated_entity_ids,
+                    ("light.living", "light.study"),
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Turn off Study light on Ground Floor.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        universal_blocked_restarts = (
+            "Turn off a device; I don't need any device; turn off.",
+            "Turn off a device; I don't want any device; turn off a device.",
+            "Turn off a device; do not use any device; turn off.",
+            "Turn off a device; I don't need anything; turn off.",
+        )
+        for utterance in universal_blocked_restarts:
+            with self.subTest(universal_blocked_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertEqual(
+                    grounded.negated_entity_ids,
+                    ("cover.study", "light.living", "light.study"),
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Turn off Study light on Ground Floor.",
+                        confirmed_instruction=confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        for utterance in (
+            "Turn off a device; I don't need any light; turn off Study Lamp.",
+            "Turn off a device; I don't need any light; turn off a light.",
+        ):
+            with self.subTest(domain_reauthorized=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertEqual(grounded.negated_entity_ids, ())
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "domain-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer="Turn off Study light on Ground Floor.",
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    "light.study",
+                )
+
+        for utterance in (
+            "I don't need any device; turn off Study Lamp.",
+            "I don't need anything; turn off Study Lamp.",
+        ):
+            with self.subTest(universal_reauthorized=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertNotIn("light.study", grounded.negated_entity_ids)
+                self.assertIn("cover.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "universal-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer="Turn off Study light on Ground Floor.",
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+
+        set_confirmed = DomuxInstruction(
+            "set", "Light", "brightness", "25", "Percent", "Study", "Ground Floor"
+        )
+        attribute_first_restarts = (
+            "I don't want any light; set the brightness of Study light to 25 percent.",
+            "I don't want any light; change the brightness on Study light to 25 percent.",
+            (
+                "I don't want any light; could you set the brightness of "
+                "Study light to 25 percent?"
+            ),
+            "I don't want any light; set brightness to 25 percent on Study light.",
+        )
+        for utterance in attribute_first_restarts:
+            with self.subTest(attribute_first_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    set_confirmed.to_pipe(),
+                    registry,
+                )
+                self.assertNotIn("light.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "attribute-first-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer=(
+                        "Set Study light brightness to 25 percent on Ground Floor."
+                    ),
+                    confirmed_instruction=set_confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+
+    def test_generic_device_aliases_share_one_exclusion_and_restart_policy(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Lamp", "Study", "Ground Floor"),
+            EntitySpec("cover.study", "cover", "Blind", "Study", "Ground Floor"),
+            EntitySpec(
+                "climate.study", "climate", "Air Conditioner", "Study", "Ground Floor"
+            ),
+        ))
+        states = {
+            "light.study": {
+                "entity_id": "light.study",
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            },
+            "cover.study": {
+                "entity_id": "cover.study",
+                "state": "open",
+                "attributes": {"current_position": 100, "supported_features": 7},
+            },
+            "climate.study": {
+                "entity_id": "climate.study",
+                "state": "cool",
+                "attributes": {
+                    "temperature": 24.0,
+                    "hvac_modes": ["off", "cool", "heat"],
+                    "supported_features": 1,
+                    "temperature_unit": "°C",
+                    "min_temp": 16.0,
+                    "max_temp": 30.0,
+                    "target_temp_step": 0.5,
+                },
+            },
+        }
+        climate_confirmed = DomuxInstruction(
+            "turnOff", "Air Conditioner", "*", "*", "*", "Study", "Ground Floor"
+        )
+        climate_exclusions = (
+            "Turn off a device; do not use any air conditioning; turn off a device.",
+            "Turn off a device; avoid any air conditioning; turn off a device.",
+            "Turn off a device; without any air conditioning; turn off a device.",
+            "Turn off a device; do not use any a c; turn off a device.",
+            "Turn off a device; avoid any A/C; turn off a device.",
+        )
+        for utterance in climate_exclusions:
+            with self.subTest(climate_exclusion=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    climate_confirmed.to_pipe(),
+                    registry,
+                )
+                self.assertIn("climate.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=registry,
+                        adapter=adapter,
+                        clarification_answer="Turn off the Study Air Conditioner.",
+                        confirmed_instruction=climate_confirmed,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
+        positive_restarts = (
+            (
+                "I don't want any lamp; turn off Study lamp.",
+                DomuxInstruction(
+                    "turnOff", "Lamp", "*", "*", "*", "Study", "Ground Floor"
+                ),
+                "Turn off Study lamp.",
+            ),
+            (
+                "I don't want any blind; close Study blind.",
+                DomuxInstruction(
+                    "turnOff", "Blind", "*", "*", "*", "Study", "Ground Floor"
+                ),
+                "Close Study blind.",
+            ),
+            (
+                "I don't want any air conditioner; turn off Study air conditioner.",
+                climate_confirmed,
+                "Turn off Study air conditioner.",
+            ),
+        )
+        for utterance, confirmed, clarification_answer in positive_restarts:
+            with self.subTest(generic_device_positive_restart=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    confirmed.to_pipe(),
+                    registry,
+                )
+                self.assertEqual(grounded.negated_entity_ids, ())
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "generic-device-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer=clarification_answer,
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+
+    def test_domain_aliases_inside_room_names_do_not_reauthorize_that_domain(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.ac_room", "light", "Light", "AC Room", "Ground Floor"),
+            EntitySpec("climate.study", "climate", "AC", "Study", "Ground Floor"),
+            EntitySpec(
+                "cover.light_room", "cover", "Curtain", "Light Room", "Ground Floor"
+            ),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        climate_excluded = ground_domux_request(
+            "I don't want any AC; turn off the light in AC Room.",
+            "turnOff|Light|*|*|*|AC Room|Ground Floor",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in climate_excluded.candidates),
+            ("light.ac_room",),
+        )
+        self.assertIn("climate.study", climate_excluded.negated_entity_ids)
+        self.assertNotIn("light.ac_room", climate_excluded.negated_entity_ids)
+
+        light_excluded = ground_domux_request(
+            "I don't want any light; close the curtain in Light Room.",
+            "turnOff|Curtain|*|*|*|Light Room|Ground Floor",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in light_excluded.candidates),
+            ("cover.light_room",),
+        )
+        self.assertIn("light.study", light_excluded.negated_entity_ids)
+        self.assertNotIn("cover.light_room", light_excluded.negated_entity_ids)
+
+    def test_domain_alias_inside_room_preserves_the_explicit_room_constraint(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("climate.ac_room", "climate", "AC", "AC Room", "Ground Floor"),
+            EntitySpec("climate.study", "climate", "AC", "Study", "Ground Floor"),
+            EntitySpec(
+                "light.light_room", "light", "Light", "Light Room", "Ground Floor"
+            ),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        states = {
+            "climate.ac_room": {
+                "entity_id": "climate.ac_room",
+                "state": "cool",
+                "attributes": {
+                    "temperature": 24.0,
+                    "hvac_modes": ["off", "cool", "heat"],
+                    "supported_features": 1,
+                    "temperature_unit": "°C",
+                    "min_temp": 16.0,
+                    "max_temp": 30.0,
+                    "target_temp_step": 0.5,
+                },
+            },
+            "climate.study": {
+                "entity_id": "climate.study",
+                "state": "cool",
+                "attributes": {
+                    "temperature": 24.0,
+                    "hvac_modes": ["off", "cool", "heat"],
+                    "supported_features": 1,
+                    "temperature_unit": "°C",
+                    "min_temp": 16.0,
+                    "max_temp": 30.0,
+                    "target_temp_step": 0.5,
+                },
+            },
+            "light.light_room": {
+                "entity_id": "light.light_room",
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            },
+            "light.study": {
+                "entity_id": "light.study",
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            },
+        }
+        cases = (
+            (
+                "I don't want any AC; turn off the AC in AC Room.",
+                DomuxInstruction(
+                    "turnOff", "AC", "*", "*", "*", "AC Room", "Ground Floor"
+                ),
+                "climate.ac_room",
+            ),
+            (
+                "I don't want any light; turn off the light in Light Room.",
+                DomuxInstruction(
+                    "turnOff", "Light", "*", "*", "*", "Light Room", "Ground Floor"
+                ),
+                "light.light_room",
+            ),
+        )
+        for utterance, confirmed, expected_entity_id in cases:
+            with self.subTest(spatial_domain_alias=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    confirmed.to_pipe(),
+                    registry,
+                )
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    (expected_entity_id,),
+                )
+                self.assertNotIn(expected_entity_id, grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "spatial-domain-alias-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer=utterance.split("; ", 1)[1],
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    expected_entity_id,
+                )
+
+    def test_shared_device_labels_preserve_qualified_negative_scope(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec(
+                "light.living", "light", "Ceiling Light", "Living Room", "Ground Floor"
+            ),
+            EntitySpec(
+                "light.study", "light", "Ceiling Light", "Study", "Ground Floor"
+            ),
+        ))
+        states = {
+            entity.entity_id: {
+                "entity_id": entity.entity_id,
+                "state": "on",
+                "attributes": {
+                    "brightness": 128,
+                    "supported_color_modes": ["brightness"],
+                },
+            }
+            for entity in registry.entities
+        }
+        confirmed = DomuxInstruction(
+            "turnOff", "Ceiling Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        utterances = (
+            "Do not use the Living Room Ceiling Light; turn off the Study Ceiling Light.",
+            "Do not use the Living Room Ceiling Light. Turn off the Study Ceiling Light.",
+            "Do not turn off the Living Room Ceiling Light; turn off the Study Ceiling Light.",
+            "Avoid the Living Room Ceiling Light; turn off the Study Ceiling Light.",
+            "Do not use the light in Living Room; turn off the Study Ceiling Light.",
+        )
+        for utterance in utterances:
+            with self.subTest(qualified_exclusion=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Ceiling Light|*|*|*|Study|Ground Floor",
+                    registry,
+                )
+                self.assertEqual(grounded.negated_entity_ids, ("light.living",))
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("light.study",),
+                )
+                adapter = InMemoryHAAdapter(states)
+                store = PreparedActionStore(
+                    clock=MutableClock(),
+                    nonce_factory=lambda: "shared-device-restart-nonce",
+                )
+                action = store.prepare(
+                    actor_id="actor-a",
+                    session_id="session-a",
+                    grounded=grounded,
+                    registry=registry,
+                    adapter=adapter,
+                    clarification_answer=(
+                        "Turn off the Study Ceiling Light on Ground Floor."
+                    ),
+                    confirmed_instruction=confirmed,
+                )
+                result = store.commit(
+                    action.confirmation(),
+                    registry=registry,
+                    adapter=adapter,
+                )
+                self.assertEqual((result.status, len(adapter.sut_calls)), ("COMMITTED", 1))
+                self.assertEqual(
+                    adapter.sut_calls[0]["data"]["entity_id"],
+                    "light.study",
+                )
 
     def test_target_repair_must_answer_the_unresolved_selector_slot(self) -> None:
         registry = EntityRegistry((
@@ -1090,6 +2910,48 @@ class GroundingTests(unittest.TestCase):
         self.assertTrue(excluded.clarification.required)
         self.assertIn("light.study", excluded.negated_entity_ids)
 
+        quantified_command_exclusions = (
+            "Anything but turn off Study light.",
+            "Do anything but turn off Study light.",
+            "Please do anything but turn off Study light.",
+            "Turn off a light; anything but turn off Study light.",
+            "Anything but could you please turn off Study light?",
+        )
+        confirmed_study = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        for utterance in quantified_command_exclusions:
+            with self.subTest(quantified_command_exclusion=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    confirmed_study.to_pipe(),
+                    two_lights,
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                adapter = InMemoryHAAdapter({
+                    entity.entity_id: {
+                        "entity_id": entity.entity_id,
+                        "state": "on",
+                        "attributes": {
+                            "brightness": 128,
+                            "supported_color_modes": ["brightness"],
+                        },
+                    }
+                    for entity in two_lights.entities
+                })
+                store = PreparedActionStore(clock=MutableClock())
+                with self.assertRaises(GroundingError):
+                    store.prepare(
+                        actor_id="actor-a",
+                        session_id="session-a",
+                        grounded=grounded,
+                        registry=two_lights,
+                        adapter=adapter,
+                        clarification_answer="Turn off Study light.",
+                        confirmed_instruction=confirmed_study,
+                    )
+                self.assertEqual(adapter.sut_calls, [])
+
         contrastive = ground_domux_request(
             "Turn off not the Study light but the Living Room light.",
             "turnOff|Light|*|*|*|Living Room|Ground Floor",
@@ -1153,11 +3015,16 @@ class GroundingTests(unittest.TestCase):
                     two_lights,
                 )
                 self.assertTrue(unresolved_exclusion.clarification.required)
-                self.assertIn(
-                    "unsupported_request_grammar",
-                    unresolved_exclusion.clarification.reasons,
+                self.assertTrue(
+                    {
+                        "unsupported_request_grammar",
+                        "negated_selector",
+                    }.intersection(unresolved_exclusion.clarification.reasons)
                 )
-                with self.assertRaisesRegex(GroundingError, "new immediate command"):
+                with self.assertRaisesRegex(
+                    GroundingError,
+                    "new immediate command|explicitly excluded entity|does not select a candidate",
+                ):
                     resolve_clarification_submission(
                         unresolved_exclusion,
                         answer="Yes.",

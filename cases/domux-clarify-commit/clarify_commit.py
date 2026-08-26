@@ -29,22 +29,59 @@ SUPPORTED_DOMAINS = frozenset({"light", "cover", "climate"})
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_]+$")
 GENERIC_DEVICE_ALIASES = {
     "light": "light",
+    "lights": "light",
     "lamp": "light",
+    "lamps": "light",
     "lighting": "light",
     "curtain": "cover",
     "curtains": "cover",
     "blind": "cover",
     "blinds": "cover",
     "shade": "cover",
+    "shades": "cover",
+    "cover": "cover",
+    "covers": "cover",
     "ac": "climate",
+    "acs": "climate",
     "a c": "climate",
+    "a/c": "climate",
     "air conditioner": "climate",
+    "air conditioners": "climate",
     "air conditioning": "climate",
 }
+GENERIC_DEVICE_NOUN_RE = (
+    "(?:"
+    + "|".join(
+        re.escape(alias)
+        for alias in sorted(GENERIC_DEVICE_ALIASES, key=len, reverse=True)
+    )
+    + ")"
+)
 GENERIC_REFERENCE_NOUN_RE = (
-    r"(?:one|ones|device|devices|light|lights|lighting|lamp|lamps|curtain|curtains|"
-    r"blind|blinds|shade|shades|cover|covers|ac|acs|air\s+conditioner|"
-    r"air\s+conditioners|room|rooms|floor|floors|level|levels)"
+    rf"(?:one|ones|device|devices|{GENERIC_DEVICE_NOUN_RE}|"
+    r"room|rooms|floor|floors|level|levels)"
+)
+CORRECTION_SELECTOR_ACTION_RE = r"(?:use|select|choose|mean)"
+SELECTOR_ACTION_RE = rf"(?:{CORRECTION_SELECTOR_ACTION_RE}|touch|act\s+on)"
+STATE_CHANGE_ACTION_RE = (
+    r"(?:turn(?:\s+(?:on|off))?|switch(?:\s+(?:on|off))?|open|close|set|"
+    r"change|make|move|adjust|raise|lower|increase|decrease|execute|proceed|"
+    r"dispatch)"
+)
+EXECUTION_CONTROL_ACTION_RE = (
+    rf"(?:{STATE_CHANGE_ACTION_RE}|confirm|authorize|approve|go\s+ahead|do\s+it)"
+)
+STATE_COMMAND_RE = (
+    rf"(?:(?:(?:please|just)\s+)*{STATE_CHANGE_ACTION_RE}|"
+    rf"(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:just\s+)?"
+    rf"{STATE_CHANGE_ACTION_RE}|"
+    rf"(?:i|we)\s+(?:just\s+)?(?:want|need)\s+(?:you\s+)?to\s+"
+    rf"(?:please\s+)?(?:just\s+)?"
+    rf"{STATE_CHANGE_ACTION_RE})"
+)
+RESTART_COMMAND_RE = (
+    rf"(?:{STATE_COMMAND_RE}|(?:(?:please|just)\s+)*"
+    rf"(?:(?:i|we)\s+(?:just\s+)?{SELECTOR_ACTION_RE}|{SELECTOR_ACTION_RE}))"
 )
 OTHER_REFERENCE_RE = (
     rf"\b(?:the\s+other(?!\s+than\b)(?:\s+(?:[a-z0-9]+\s+){{0,3}}"
@@ -675,37 +712,339 @@ def _distinct_named_values(text: str, values: Iterable[str]) -> frozenset[str]:
     )
 
 
-def _selector_span_is_negative(normalized_text: str, start: int) -> bool:
-    """Return whether a selector occurrence is under a bounded negative scope."""
+def _negative_clause_is_selector_only(text: str) -> bool:
+    """Return whether a negative clause only excludes a target selector."""
 
-    prefix = normalized_text[max(0, start - 120):start]
+    normalized = normalize_text(text)
+    if re.search(
+        rf"\b(?:{EXECUTION_CONTROL_ACTION_RE}|want|need|have)\b",
+        normalized,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:do\s+not|don't|dont|never|cannot|can't|cant|won't|wont|"
+            r"wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|mustn't|"
+            r"mustnt|not)\s+(?:please\s+)?"
+            rf"{CORRECTION_SELECTOR_ACTION_RE}\b",
+            normalized,
+        )
+        or re.match(
+            r"\s*(?:not|no|except|besides|other\s+than|anything\s+but|"
+            r"everything\s+but|all\s+but|apart\s+from|instead\s+of|avoid|without)\b",
+            normalized,
+        )
+    )
+
+
+def _negative_clause_has_target_predicate(text: str) -> bool:
+    """Require a negated target to be attached to a bounded predicate."""
+
+    normalized = normalize_text(text)
+    if re.search(
+        rf"\b(?:{SELECTOR_ACTION_RE}|{EXECUTION_CONTROL_ACTION_RE}|want|need|have)\b",
+        normalized,
+    ):
+        return True
+    return bool(re.match(
+        r"\s*(?:not|no|except|besides|other\s+than|anything\s+but|"
+        r"everything\s+but|all\s+but|apart\s+from|instead\s+of|avoid|without)"
+        r"\s+(?:(?:a|an|the|this|that|any|all|every|each|either)\s+)?"
+        r"[a-z0-9]",
+        normalized,
+    ))
+
+
+def _negative_clause_is_control_withdrawal(text: str) -> bool:
+    """Return whether a complete targetless execution-control was withdrawn."""
+
+    normalized = normalize_text(text).rstrip(" ,;:—.!?")
+    negative_lead = (
+        r"(?:do\s+not|don't|dont|never(?:\s+ever)?|cannot|can't|cant|won't|"
+        r"wont|wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|mustn't|"
+        r"mustnt|(?:must|may|shall|should|can|could|will|would)\s+not)"
+    )
+    control = r"(?:proceed|execute|confirm|authorize|approve|dispatch|go\s+ahead|do\s+it)"
+    return bool(re.fullmatch(
+        rf"\s*{negative_lead}\s+(?:please\s+)?{control}\s*",
+        normalized,
+    ))
+
+
+def _selector_span_is_negative(
+    normalized_text: str,
+    start: int,
+    end: int | None = None,
+    selector_spans: Sequence[tuple[int, int]] = (),
+) -> bool:
+    """Return whether a selector occurrence is inside the current negative clause.
+
+    Inventory labels may be quoted or parenthesized, and a clarifying noun
+    phrase may be more than a fixed number of words after ``not``.  Character
+    distance is therefore not a safe scope boundary.  Keep negation active
+    within the current clause and reset it only at an explicit hard boundary,
+    positive contrast, or new imperative.
+    """
+
+    # Keep the complete prefix.  Punctuation is interpreted below only after
+    # checking what appeared between the negator and the apparent restart.
+    # That prevents emphasis such as ``not!!! Study`` and an entity ID such as
+    # ``climate.study`` from silently terminating negative scope.
+    prefix = normalized_text[:start]
+    prefix_offset = 0
+    quantified_exclusion = False
+    command_quantified_exclusion = False
+    anaphoric_exclusion = False
     contrastive_boundaries = tuple(re.finditer(r"\b(?:but|rather)\b", prefix))
     if contrastive_boundaries:
         boundary = contrastive_boundaries[-1]
         before = prefix[:boundary.start()]
-        if not re.search(r"\b(?:anything|everything|nothing)\s+$", before):
-            prefix = prefix[boundary.end():]
+        after = prefix[boundary.end():]
+        command_quantified_exclusion = bool(
+            re.search(r"\b(?:anything|everything)\b[\s,([{'\"]*$", before)
+        )
+        quantified_exclusion = bool(
+            command_quantified_exclusion
+            or re.search(
+                r"\b(?:all|any|each|either|every)\b[^.!?;—]*$",
+                before,
+            )
+        )
+        # ``but by that I mean X`` can resolve an anaphor inside the
+        # preceding negative clause; it is not a positive correction.  The
+        # shorter ``but I mean X`` is also carried when the negative clause
+        # ended in a generic/deictic target.  Stable-target corrections such
+        # as ``do not use Living, but I mean Study`` remain positive.
+        negative_before = re.search(
+            r"\b(?:do\s+not|don't|dont|never|cannot|can't|cant|won't|wont|"
+            r"wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|mustn't|"
+            r"mustnt|not|no|except|besides|avoid|without)\b",
+            before,
+        )
+        anaphoric_exclusion = bool(
+            negative_before
+            and (
+                re.match(
+                    r"\s*by\s+(?:that|it|this)[\s,;:—-]*(?:i|we)\s+mean\b",
+                    after,
+                )
+                or (
+                    re.match(r"\s*(?:i|we)\s+mean\b", after)
+                    and re.search(
+                        rf"\b(?:it|that|this|{GENERIC_REFERENCE_NOUN_RE})\b"
+                        r"[\s,()'\"—-]*$",
+                        before,
+                    )
+                )
+            )
+        )
+        prefix = prefix[boundary.end():]
+        prefix_offset += boundary.end()
+    negative_action = rf"(?:{SELECTOR_ACTION_RE}|{STATE_CHANGE_ACTION_RE})"
     strong_negative = (
-        r"(?:do\s+not|don't|dont)\s+(?:use|select|choose|mean|touch|act\s+on)|"
+        rf"(?:do\s+not|don't|dont|not)(?:\s+to)?\s+{negative_action}|"
+        r"(?:do\s+not|don't|dont|never|cannot|can't|cant|won't|wont|"
+        r"wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|mustn't|mustnt)|"
         r"(?:except|besides|other\s+than|anything\s+but|apart\s+from|"
-        r"instead\s+of|avoid|without)|no"
+        r"everything\s+but|all\s+but|instead\s+of|avoid|without)|no"
     )
-    return bool(re.search(
-        rf"\b(?:{strong_negative})\b(?:\s+[a-z0-9]+){{0,10}}\s*$|"
-        rf"\bnot\b(?:\s+[a-z0-9]+){{0,8}}\s*$",
-        prefix,
-    ))
+    carried_exclusion = quantified_exclusion or anaphoric_exclusion
+    last_negative_start: int | None = None
+    if carried_exclusion:
+        tail = prefix
+        tail_offset = prefix_offset
+    else:
+        negative_matches = tuple(re.finditer(
+            rf"\b(?:{strong_negative})\b|\bnot\b",
+            prefix,
+        ))
+        if not negative_matches:
+            return False
+        last_negative = negative_matches[-1]
+        last_negative_start = prefix_offset + last_negative.start()
+        tail = prefix[last_negative.end():]
+        tail_offset = prefix_offset + last_negative.end()
+        if last_negative.group(0) == "no" and re.match(
+            r"\s*,\s*(?:actually|perhaps|rather|instead|sorry|"
+            r"(?:i\s+)?(?:mean|want|choose|select|use)|just\s+use)\b",
+            tail,
+        ):
+            return False
+    # A shared negator can govern a coordinated verb list: ``do not use,
+    # choose, or mean Study Lamp``.  In that construction the commas and
+    # conjunctions introduce no positive imperative because no target occurs
+    # between the verbs.  Keep the whole list negative; a later imperative
+    # remains expressible with ``then``/``and then``, hard punctuation, or a
+    # comma after an already named target.
+    coordinated_delimiter = r"(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)"
+    coordinated_negative_actions = (
+        None
+        if carried_exclusion
+        else re.match(
+            rf"\s*(?:{coordinated_delimiter}(?:please\s+)?"
+            rf"{negative_action}\b\s*)+",
+            tail,
+        )
+    )
+    restart_tail = (
+        tail[coordinated_negative_actions.end():]
+        if coordinated_negative_actions
+        else tail
+    )
+    restart_tail_offset = tail_offset + (
+        coordinated_negative_actions.end()
+        if coordinated_negative_actions
+        else 0
+    )
+    restart_command = RESTART_COMMAND_RE
+    if quantified_exclusion and not command_quantified_exclusion and re.match(
+        rf"\s*{restart_command}\b",
+        tail,
+    ):
+        return False
+    def has_prior_stable_target(relative_end: int) -> bool:
+        absolute_end = restart_tail_offset + relative_end
+        return any(
+            tail_offset <= selector_start
+            and selector_end <= absolute_end
+            for selector_start, selector_end in selector_spans
+        )
+
+    def has_prior_target(relative_end: int) -> bool:
+        absolute_end = restart_tail_offset + relative_end
+        generic_target = re.search(
+            rf"\b(?:anything|everything|it|that|this|{GENERIC_REFERENCE_NOUN_RE})\b",
+            normalized_text[tail_offset:absolute_end],
+        )
+        return has_prior_stable_target(relative_end) or generic_target is not None
+
+    state_restart = rf"{STATE_COMMAND_RE}\b"
+
+    def positive_restart(
+        relative_end: int,
+        command_text: str,
+        boundary_text: str,
+    ) -> bool:
+        complete_state_command = re.match(state_restart, command_text) is not None
+        absolute_end = restart_tail_offset + relative_end
+        negative_clause_start = (
+            tail_offset if last_negative_start is None else last_negative_start
+        )
+        negative_clause = (
+            ""
+            if not carried_exclusion and last_negative_start is None
+            else normalized_text[negative_clause_start:absolute_end]
+        )
+        stable_target = has_prior_stable_target(relative_end)
+        # A colon can introduce the content being rejected ("I don't want
+        # this: turn off Study").  Without a stable target on the negative
+        # side it is not an authorization boundary.
+        if boundary_text == ":" and not stable_target:
+            return False
+        explicit_sequence = bool(
+            boundary_text == ";" or re.fullmatch(r"(?:and\s+then|then)", boundary_text)
+        )
+        if (
+            complete_state_command
+            and explicit_sequence
+            and _negative_clause_is_control_withdrawal(negative_clause)
+        ):
+            return True
+        if not _negative_clause_has_target_predicate(negative_clause):
+            if carried_exclusion and stable_target and complete_state_command:
+                return explicit_sequence
+            return False
+        if stable_target:
+            if complete_state_command:
+                return True
+            return _negative_clause_is_selector_only(negative_clause)
+        if not has_prior_target(relative_end):
+            return False
+        return complete_state_command
+
+    def selector_only_restart(relative_end: int) -> bool:
+        if (
+            last_negative_start is None
+            or not has_prior_stable_target(relative_end)
+        ):
+            return False
+        absolute_end = restart_tail_offset + relative_end
+        negative_clause = normalized_text[last_negative_start:absolute_end]
+        return (
+            _negative_clause_has_target_predicate(negative_clause)
+            and _negative_clause_is_selector_only(negative_clause)
+        )
+
+    punctuation_restarts = re.finditer(
+        rf"(?P<delimiter>[!?;,:—]|\.(?![a-z0-9]))\s*"
+        rf"(?P<command>{restart_command})\b",
+        restart_tail,
+    )
+    for restart in punctuation_restarts:
+        if positive_restart(
+            restart.start(),
+            restart.group("command"),
+            restart.group("delimiter"),
+        ):
+            return False
+    for restart in re.finditer(
+        rf"\b(?P<delimiter>and\s+then|then)\s+"
+        rf"(?P<command>{restart_command})\b",
+        restart_tail,
+    ):
+        if positive_restart(
+            restart.start(),
+            restart.group("command"),
+            restart.group("delimiter"),
+        ):
+            return False
+    for boundary in re.finditer(r"[!?;:—]|\.(?![a-z0-9])", restart_tail):
+        suffix = restart_tail[boundary.end():]
+        if selector_only_restart(boundary.start()) and re.fullmatch(
+            r"[\s([{\"']*(?:(?:the|this|that|my|your|our)\s+)?",
+            suffix,
+        ):
+            return False
+    effective_end = end if end is not None else start
+    effective_end = max(
+        (
+            selector_end
+            for selector_start, selector_end in selector_spans
+            if selector_start <= start
+            and effective_end <= selector_end
+        ),
+        default=effective_end,
+    )
+    if (
+        not carried_exclusion
+        and selector_only_restart(len(restart_tail))
+        and re.search(r"[,;:—]\s*(?:(?:the|this|that|my|your|our)\s+)?$", restart_tail)
+        and re.match(r"\s+instead\b", normalized_text[effective_end:])
+    ):
+        return False
+    return True
 
 
 def _positive_named_matches(
     text: str,
     values: Iterable[str],
+    *,
+    selector_spans: Sequence[tuple[int, int]] = (),
 ) -> tuple[tuple[int, int, str], ...]:
     normalized = normalize_text(text)
+    matches = _distinct_named_matches(normalized, values)
+    known_spans = tuple(selector_spans) or tuple(
+        (start, end) for start, end, _value in matches
+    )
     return tuple(
         match
-        for match in _distinct_named_matches(normalized, values)
-        if not _selector_span_is_negative(normalized, match[0])
+        for match in matches
+        if not _selector_span_is_negative(
+            normalized,
+            match[0],
+            match[1],
+            known_spans,
+        )
         and not (
             re.search(r"\bleave\s+(?:the\s+)?$", normalized[:match[0]])
             and re.match(
@@ -816,7 +1155,7 @@ def _selector_match_is_anchored(
     if any(_phrase_in(value, label) for label in GENERIC_DEVICE_ALIASES):
         return True
     command_before = bool(re.search(
-        r"\b(?:turn|switch|open|close|set|change|make|adjust|raise|lower|"
+        r"\b(?:turn|switch|open|close|set|change|make|move|adjust|raise|lower|"
         r"increase|decrease|use|select|choose|mean)\b(?:\s+(?:on|off))?"
         r"(?:\s+(?:the|that|this|my))?\s+$|"
         r"\b(?:the|that|this|my)\s+$",
@@ -829,6 +1168,141 @@ def _selector_match_is_anchored(
     return command_before or operation_after or locative_before or explicit_slot
 
 
+def _registry_selector_spans(
+    text: str,
+    registry: EntityRegistry,
+) -> tuple[tuple[int, int], ...]:
+    """Return actual stable inventory-selector spans for scope transitions."""
+
+    normalized = normalize_text(text)
+    labels = (
+        ("room", tuple(entity.room for entity in registry.entities)),
+        ("floor", tuple(entity.floor for entity in registry.entities)),
+        ("device", tuple(
+            entity.device
+            for entity in registry.entities
+            if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES
+        )),
+        ("alias", tuple(alias for entity in registry.entities for alias in entity.aliases)),
+        ("entity", tuple(entity.entity_id for entity in registry.entities)),
+    )
+    spans: set[tuple[int, int]] = set()
+    for category, values in labels:
+        for start, end, value in _distinct_named_matches(normalized, values):
+            if not _label_is_grammar_collision(value) or _selector_match_is_anchored(
+                normalized,
+                start,
+                end,
+                value,
+                category,
+                registry,
+            ):
+                spans.add((start, end))
+    return tuple(sorted(spans))
+
+
+def _final_authorization_clause(text: str, registry: EntityRegistry) -> str:
+    """Return the clause after a complete, explicit positive restart.
+
+    A negative command may name an old target before a new immediate command,
+    for example ``do not turn off Living; turn off Study``.  The latter clause
+    is independent authorization only when the negative clause already named
+    a stable or generic target and the restart begins with a supported command.
+    This target-before-boundary rule keeps emphasis such as ``do not! turn off
+    Study`` inside negative scope.
+    """
+
+    normalized = normalize_text(text)
+    negative_anchor = (
+        r"\b(?:do\s+not|don't|dont|never(?:\s+ever)?|cannot|can't|cant|"
+        r"won't|wont|wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|"
+        r"mustn't|mustnt|not|no|avoid|without|except|besides|other\s+than|"
+        r"anything\s+but|everything\s+but|all\s+but|apart\s+from|instead\s+of)\b"
+    )
+    negatives = tuple(re.finditer(negative_anchor, normalized))
+    if not negatives:
+        return normalized
+    last_negative = negatives[-1]
+    selector_spans = _registry_selector_spans(normalized, registry)
+    generic_target = re.compile(
+        rf"\b(?:anything|everything|it|that|this|{GENERIC_REFERENCE_NOUN_RE})\b"
+    )
+
+    def has_prior_target(boundary_start: int) -> bool:
+        if any(
+            last_negative.end() <= selector_start
+            and selector_end <= boundary_start
+            for selector_start, selector_end in selector_spans
+        ):
+            return True
+        return generic_target.search(
+            normalized,
+            last_negative.end(),
+            boundary_start,
+        ) is not None
+
+    command = RESTART_COMMAND_RE
+    state_command = rf"{STATE_COMMAND_RE}\b"
+
+    def valid_restart(restart: re.Match[str]) -> bool:
+        boundary_start = restart.start("boundary")
+        if boundary_start < last_negative.end():
+            return False
+        complete_state_command = (
+            re.match(state_command, restart.group("command")) is not None
+        )
+        negative_clause = normalized[last_negative.start():boundary_start]
+        if not _negative_clause_has_target_predicate(negative_clause):
+            return False
+        stable_target = any(
+            last_negative.end() <= selector_start
+            and selector_end <= boundary_start
+            for selector_start, selector_end in selector_spans
+        )
+        boundary_text = restart.group("boundary")
+        if boundary_text == ":" and not stable_target:
+            return False
+        explicit_sequence = bool(
+            boundary_text == ";"
+            or re.fullmatch(r"(?:and\s+then|then)", boundary_text)
+        )
+        if (
+            complete_state_command
+            and explicit_sequence
+            and _negative_clause_is_control_withdrawal(negative_clause)
+        ):
+            return True
+        if stable_target:
+            if complete_state_command:
+                return True
+            return _negative_clause_is_selector_only(negative_clause)
+        if not has_prior_target(boundary_start):
+            return False
+        # A generic withdrawal can only be superseded by a complete new
+        # state-changing command.  ``I mean Study`` merely identifies which
+        # generic target was unwanted and cannot revive an earlier action.
+        return complete_state_command
+
+    restart_points: list[int] = []
+    for restart in re.finditer(
+        rf"(?P<boundary>[!?;,:—]|\.(?![a-z0-9]))\s*"
+        rf"(?:(?:but|rather)\s+)?(?P<command>{command})\b",
+        normalized,
+    ):
+        if valid_restart(restart):
+            restart_points.append(restart.start("command"))
+    for restart in re.finditer(
+        rf"(?P<boundary>\b(?:and\s+then|then|but|rather)\b)\s+"
+        rf"(?P<command>{command})\b",
+        normalized,
+    ):
+        if valid_restart(restart):
+            restart_points.append(restart.start("command"))
+    if not restart_points:
+        return normalized
+    return normalized[min(restart_points):]
+
+
 def _selector_label_evidence(
     text: str,
     label: str,
@@ -838,7 +1312,11 @@ def _selector_label_evidence(
     """Recognize a label in a clarification without protocol-word collisions."""
 
     normalized = normalize_text(text)
-    matches = _positive_named_matches(normalized, (label,))
+    matches = _positive_named_matches(
+        normalized,
+        (label,),
+        selector_spans=_registry_selector_spans(normalized, registry),
+    )
     if not matches:
         return False
     if not _label_is_grammar_collision(label):
@@ -1211,10 +1689,15 @@ def _unanchored_registry_selector_slots(
     )
     unresolved: list[str] = []
     normalized = normalize_text(utterance)
+    selector_spans = _registry_selector_spans(normalized, registry)
     occurrences = tuple(
         (start, end, value, category, slot)
         for category, slot, values in labels
-        for start, end, value in _positive_named_matches(normalized, values)
+        for start, end, value in _positive_named_matches(
+            normalized,
+            values,
+            selector_spans=selector_spans,
+        )
     )
     anchored_spans = tuple(
         (start, end)
@@ -1379,8 +1862,8 @@ def _has_negative_action_authorization(text: str) -> bool:
 
     normalized = normalize_text(text)
     action = (
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|decrease|execute|"
-        r"proceed|act|go\s+ahead|do\s+it|touch|confirm|authorize|approve|dispatch)"
+        rf"(?:{STATE_CHANGE_ACTION_RE}|act|go\s+ahead|do\s+it|touch|confirm|"
+        r"authorize|approve)"
     )
     bridge = r"(?:(?:you|me|us|i|we|to|need|want|let|allow|please|just)\s+){0,8}"
     return bool(re.search(
@@ -1415,6 +1898,80 @@ def _has_negated_direction(text: str) -> bool:
     ))
 
 
+def _generic_withdrawal_pattern(generic_target: str) -> str:
+    """Build the shared generic-target withdrawal grammar."""
+
+    selection_action = r"(?:use|select|choose|touch|act\s+on)"
+    intent_verb = (
+        rf"(?:{selection_action}|(?:want|need|have)"
+        rf"(?:\s+(?:you|me|us|them|him|her))?"
+        rf"(?:\s+to\s+{selection_action})?)"
+    )
+    negative_lead = (
+        r"(?:do\s+not|don't|dont|never(?:\s+ever)?|cannot|can't|cant|won't|"
+        r"wont|wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|mustn't|"
+        r"mustnt|(?:must|may|shall|should|can|could|will|would)\s+not)"
+    )
+    speaker = r"(?:(?:i|we|you)\s+)?"
+    no_relation = rf"(?:for|of|to\s+{selection_action})"
+    return (
+        rf"\b(?:{negative_lead}\s+{intent_verb}|"
+        rf"{speaker}(?:have|want|need)\s+no"
+        rf"(?:\s+(?:need|use)\s+{no_relation})?|"
+        rf"no\s+(?:need|use)\s+{no_relation}|"
+        rf"{speaker}(?:need|want)\s+not\s+(?:to\s+)?{selection_action}|"
+        rf"{speaker}(?:would|should|could)\s+rather\s+not\s+{selection_action})"
+        rf"\s+{generic_target}\b"
+    )
+
+
+def _has_generic_withdrawal(text: str) -> bool:
+    """Detect withdrawal/negative possession of a generic device target."""
+
+    normalized = normalize_text(text)
+    generic_target = (
+        rf"(?:anything|everything|it|that|this|(?:(?:any|a|an|the|this|that|one|all|every|"
+        rf"each|either)\s+)?{GENERIC_REFERENCE_NOUN_RE})"
+    )
+    return bool(re.search(_generic_withdrawal_pattern(generic_target), normalized))
+
+
+def _has_generic_domain_withdrawal(
+    text: str,
+    noun_pattern: str,
+    *,
+    selector_spans: Sequence[tuple[int, int]] = (),
+) -> bool:
+    """Return whether a withdrawal directly governs one generic domain noun."""
+
+    normalized = normalize_text(text)
+    generic_target = (
+        rf"(?:(?:any|a|an|the|this|that|one|all|every|each|either)\s+)?"
+        rf"(?:{noun_pattern})"
+    )
+    pattern = _generic_withdrawal_pattern(generic_target)
+    for match in re.finditer(pattern, normalized):
+        suffix = normalized[match.end():]
+        qualified = re.match(
+            r"\s+(?:but|that|which|in|on|at|from|called|named|i\s+mean|"
+            r"we\s+mean|namely)\b|"
+            r"\s*,\s*(?:namely|called|named|i\s+mean|we\s+mean)\b|"
+            r"\s*[—(]\s*[a-z0-9]",
+            suffix,
+        )
+        if qualified and any(
+            selector_start >= match.end()
+            and not re.search(
+                r"[.!?;]",
+                normalized[match.end():selector_start],
+            )
+            for selector_start, _selector_end in selector_spans
+        ):
+            continue
+        return True
+    return False
+
+
 def _has_negative_or_cancelled_intent(utterance: str) -> bool:
     normalized = normalize_text(utterance)
     negative_imperative = (
@@ -1422,24 +1979,31 @@ def _has_negative_or_cancelled_intent(utterance: str) -> bool:
         or _has_negated_direction(normalized)
         or bool(re.search(
         r"\b(?:do\s+not|don't|dont|never(?:\s+ever)?)\s+"
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|decrease)\b",
+        rf"{STATE_CHANGE_ACTION_RE}\b",
         normalized,
         ))
     )
     withdrawn_request = bool(re.search(
         r"\b(?:i\s+)?(?:do\s+not|don't|dont)\s+(?:want|need)\b.{0,48}\b"
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|"
+        r"(?:turn|switch|open|close|set|change|make|move|adjust|raise|lower|increase|"
         r"decrease|brighter|dimmer|warmer|cooler|higher)\b|"
-        r"\bno\s+need\s+to\s+(?:turn|switch|open|close|set|change|make|adjust|raise|lower|"
+        r"\bno\s+need\s+to\s+(?:turn|switch|open|close|set|change|make|move|adjust|raise|lower|"
         r"increase|decrease)\b|"
         r"\b(?:refrain\s+from|avoid)\s+(?:turning|switching|opening|closing|setting|"
-        r"changing|making|adjusting|raising|lowering)\b|"
+        r"changing|making|moving|adjusting|raising|lowering)\b|"
         r"\bwithout\s+(?:turning|switching|opening|closing|setting|changing|making|"
-        r"adjusting|raising|lowering)\b|"
+        r"moving|adjusting|raising|lowering)\b|"
         r"\bjust\s+kidding\b|"
         r"\b(?:scratch|nix|disregard|ignore)\s+(?:it|that|this)\b|"
         r"\b(?:i\s+)?changed?\s+my\s+mind\b|\bhold\s+on\b|"
         r"\b(?:actually\s+)?(?:never\s+mind|cancel(?:\s+(?:it|that|this|the\s+request))?)\b",
+        normalized,
+    ))
+    negative_preference = bool(re.search(
+        r"\b(?:(?:i|we)\s+)?(?:do\s+not|don't|dont|cannot|can't|cant|"
+        r"won't|wont|wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|"
+        r"mustn't|mustnt|(?:can|could|would|should|will|must|may)\s+not)\s+"
+        r"(?:want|need|have)\b",
         normalized,
     ))
     terminal_cancel = bool(re.fullmatch(
@@ -1454,7 +2018,22 @@ def _has_negative_or_cancelled_intent(utterance: str) -> bool:
         r"(?:actually\s+|please\s+)?(?:do not|don't|dont))[.!]?\s*$",
         normalized,
     ))
-    return negative_imperative or withdrawn_request or terminal_cancel or trailing_cancel
+    suspensive_wait = bool(
+        re.search(r"\bwait\b", normalized)
+        and not re.search(
+            r"\bwait\b.{0,64}\b(?:actually|perhaps|rather|instead|confirm)\b",
+            normalized,
+        )
+    )
+    return (
+        negative_imperative
+        or _has_generic_withdrawal(normalized)
+        or withdrawn_request
+        or negative_preference
+        or terminal_cancel
+        or trailing_cancel
+        or suspensive_wait
+    )
 
 
 def _has_unsupported_condition_or_time(utterance: str) -> bool:
@@ -1506,14 +2085,14 @@ def _has_informational_request(utterance: str) -> bool:
     return bool(re.match(
         r"^(?:(?:should|would|could|can|may)\s+i\b|"
         r"(?:i|we|you)\s+(?:do|did)\s+(?:please\s+)?"
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|decrease)\b|"
+        r"(?:turn|switch|open|close|set|change|make|move|adjust|raise|lower|increase|decrease)\b|"
         r"(?:do|did|have|has)\s+(?:you|we)\s+(?:want|need|have|mean|intend|plan|"
         r"expect|already|ever|turn|turned|switch|switched|open|opened|close|closed|"
         r"set|change|changed|make|made|adjust|adjusted)\b|"
         r"(?:should|would|could|can|may|will)\s+we\b|"
         r"(?:should|would|could|can|may|will)\s+you\s+"
         r"(?:want|need|have|mean|intend|plan|expect)\b|"
-        r"do\s+i\s+(?:turn|switch|open|close|set|change|make|adjust)\b|"
+        r"do\s+i\s+(?:turn|switch|open|close|set|change|make|move|adjust)\b|"
         r"(?:would|could)\s+it\s+be\s+(?:safe|okay|ok|wise|advisable)\b|"
         r"is\s+it\s+(?:safe|okay|ok|wise|advisable)\b|"
         r"do\s+you\s+(?:recommend|suggest|think)\b|"
@@ -1583,14 +2162,15 @@ def _has_supported_request_grammar(
         # Selector and polite-command glue.  These words carry no operation by
         # themselves; the source-to-slot checks still require positive evidence.
         "about", "ac", "air", "am", "and", "around", "at",
-        "any", "anything", "apart", "besides", "but", "by", "can", "conditioner",
-        "could", "curtain", "device",
+        "any", "anything", "apart", "besides", "but", "by", "can", "cannot",
+        "conditioner", "could", "curtain", "device",
         "floor", "for", "from", "have", "i", "in", "instead", "it", "its", "just",
         "light", "me", "my", "no", "not", "now", "of",
-        "middle", "one", "or", "other", "perhaps", "please", "right", "room", "side",
+        "may", "middle", "must", "never", "one", "or", "other", "perhaps",
+        "please", "right", "room", "shall", "should", "side",
         "something", "than",
         "sure", "talked", "that", "the", "this", "to",
-        "use", "we", "which", "would", "you",
+        "use", "we", "which", "will", "would", "you",
         *{word for color in COLOR_RGB for word in normalize_text(color).split()},
     }
     allowed = selector_words | request_words | source_mode_words | positional_selector_words
@@ -1602,28 +2182,126 @@ def _has_supported_request_grammar(
     )
 
 
-def _has_unresolved_generic_exclusion(text: str) -> bool:
-    """Reject deictic exclusions that do not identify a stable entity ID."""
+def _has_direct_generic_exclusion(
+    text: str,
+    noun_pattern: str,
+    *,
+    selector_spans: Sequence[tuple[int, int]] = (),
+) -> bool:
+    """Return whether an exclusion directly governs a generic noun phrase."""
 
-    return bool(re.search(
-        rf"\b(?:not|no)\s+(?:(?:this|that|the)\s+)?{GENERIC_REFERENCE_NOUN_RE}\b|"
+    normalized = normalize_text(text)
+    direct_marker = (
+        r"(?:not(?:\s+in)?|no|except(?:\s+for)?|besides|other\s+than|"
+        r"anything\s+but|everything\s+but|all\s+but|apart\s+from|"
+        r"instead\s+of|avoid|without)"
+        r"(?:\s+(?:using|selecting|choosing|touching))?"
+    )
+    negative_command = (
+        r"(?:(?:do\s+not|don't|dont|never|cannot|can't|cant|won't|wont|"
+        r"wouldn't|wouldnt|shouldn't|shouldnt|couldn't|couldnt|mustn't|mustnt|"
+        r"(?:must|may|shall|should|can|could|will|would)\s+not)"
+        r"(?:\s+(?:want|need)(?:\s+(?:you|me|us|them|him|her))?\s+to)?\s+"
+        r"(?:use|select|choose|touch|act\s+on))"
+    )
+    pattern = (
+        rf"\b(?:{direct_marker}|{negative_command})\s+"
+        rf"(?:(?:a|an|the|this|that|any|all|every|each|either)\s+)?"
+        rf"(?:{noun_pattern})\b"
+    )
+    for match in re.finditer(pattern, normalized):
+        suffix = normalized[match.end():]
+        qualified = re.match(
+            r"\s+(?:but|that|which|in|on|at|from|called|named|i\s+mean|"
+            r"we\s+mean|namely)\b|"
+            r"\s*,\s*(?:namely|called|named|i\s+mean|we\s+mean)\b|"
+            r"\s*[—(]\s*[a-z0-9]",
+            suffix,
+        )
+        if qualified and any(
+            selector_start >= match.end()
+            and not re.search(
+                r"[.!?;]",
+                normalized[match.end():selector_start],
+            )
+            for selector_start, _selector_end in selector_spans
+        ):
+            continue
+        return True
+    return False
+
+
+def _has_unresolved_generic_exclusion(
+    text: str,
+    registry: EntityRegistry | None = None,
+) -> bool:
+    """Reject generic exclusions that do not identify a stable entity ID."""
+
+    normalized = normalize_text(text)
+    selector_spans = (
+        _registry_selector_spans(normalized, registry)
+        if registry is not None
+        else ()
+    )
+    return _has_direct_generic_exclusion(
+        normalized,
+        rf"(?:anything|everything|{GENERIC_REFERENCE_NOUN_RE})",
+        selector_spans=selector_spans,
+    ) or bool(re.search(
         r"\bnot\s+(?:this|that)\b|"
         rf"\b(?:leave|keep)\s+(?:(?:this|that|the)\s+)?{GENERIC_REFERENCE_NOUN_RE}\s+"
         r"(?:unchanged|as\s+is)\b|"
         rf"\b(?:use|select|choose|mean)\s+{OTHER_REFERENCE_RE}",
-        normalize_text(text),
+        normalized,
     ))
 
 
-def _excluded_generic_domains(text: str) -> frozenset[str]:
+def _excluded_generic_domains(
+    text: str,
+    registry: EntityRegistry,
+) -> frozenset[str]:
     labels = {
-        "light": ("light", "lights", "lighting", "lamp", "lamps"),
-        "cover": ("curtain", "curtains", "blind", "blinds", "shade", "shades"),
-        "climate": ("ac", "acs", "air conditioner", "air conditioners"),
+        domain: tuple(
+            alias for alias, alias_domain in GENERIC_DEVICE_ALIASES.items()
+            if alias_domain == domain
+        )
+        for domain in SUPPORTED_DOMAINS
     }
+    selector_spans = _registry_selector_spans(text, registry)
     return frozenset(
         domain for domain, names in labels.items()
-        if any(_label_is_excluded(text, name) for name in names)
+        if any(
+            _has_direct_generic_exclusion(
+                text,
+                re.escape(normalize_text(name)),
+                selector_spans=selector_spans,
+            )
+            or _has_generic_domain_withdrawal(
+                text,
+                re.escape(normalize_text(name)),
+                selector_spans=selector_spans,
+            )
+            for name in names
+        )
+    )
+
+
+def _has_universal_generic_exclusion(text: str, registry: EntityRegistry) -> bool:
+    """Return whether a withdrawal excludes every supported device domain."""
+
+    normalized = normalize_text(text)
+    selector_spans = _registry_selector_spans(normalized, registry)
+    generic_target = (
+        r"(?:anything|everything|(?:(?:any|a|an|the|this|that|one|all|every|"
+        r"each|either)\s+)?devices?)"
+    )
+    return bool(re.search(
+        _generic_withdrawal_pattern(generic_target),
+        normalized,
+    )) or _has_direct_generic_exclusion(
+        normalized,
+        r"(?:anything|everything|devices?)",
+        selector_spans=selector_spans,
     )
 
 
@@ -1678,14 +2356,28 @@ def _explicit_operational_requirements(utterance: str) -> frozenset[str]:
     return frozenset(requirements)
 
 
-def _label_is_excluded(text: str, label: str) -> bool:
+def _label_is_excluded(
+    text: str,
+    label: str,
+    *,
+    selector_spans: Sequence[tuple[int, int]] = (),
+) -> bool:
     normalized_label = normalize_text(label)
     if not normalized_label:
         return False
     normalized = normalize_text(text)
+    matches = _distinct_named_matches(normalized, (normalized_label,))
+    known_spans = tuple(selector_spans) or tuple(
+        (start, end) for start, end, _value in matches
+    )
     explicitly_scoped = any(
-        _selector_span_is_negative(normalized, start)
-        for start, _end, _value in _distinct_named_matches(normalized, (normalized_label,))
+        _selector_span_is_negative(
+            normalized,
+            start,
+            end,
+            known_spans,
+        )
+        for start, end, _value in matches
     )
     return explicitly_scoped or bool(re.search(
         rf"\b(?:not(?:\s+in)?|except|besides|other\s+than|anything\s+but|"
@@ -1695,15 +2387,258 @@ def _label_is_excluded(text: str, label: str) -> bool:
     ))
 
 
+def _positive_target_domains(text: str, registry: EntityRegistry) -> frozenset[str]:
+    """Return domains named by positive domain/entity/alias/device selectors.
+
+    Room and floor labels deliberately do not count: they can be shared across
+    domains and therefore cannot by themselves reverse a domain-wide exclusion.
+    """
+
+    normalized = normalize_text(text)
+    selector_spans = _registry_selector_spans(normalized, registry)
+    state_command = re.match(rf"{STATE_COMMAND_RE}\b", normalized)
+    spatial_spans = tuple(
+        (start, end)
+        for values in (
+            tuple(entity.room for entity in registry.entities),
+            tuple(entity.floor for entity in registry.entities),
+        )
+        for start, end, _value in _distinct_named_matches(normalized, values)
+    )
+
+    target_modifiers = tuple({
+        normalize_text(value)
+        for entity in registry.entities
+        for value in (entity.room, entity.floor)
+        if normalize_text(value)
+    })
+    target_fillers = {
+        "a", "all", "an", "any", "each", "either", "every", "my", "one",
+        "our", "that", "the", "this", "your",
+    }
+    target_nouns = {
+        "ac", "acs", "air", "blind", "blinds", "conditioner", "conditioners",
+        "conditioning", "cover", "covers", "curtain",
+        "curtains", "device", "devices", "lamp", "lamps", "light", "lighting",
+        "lights", "shade", "shades",
+    }
+    operation_bridge_words = {
+        "about", "around", "at", "auto", "blue", "bright", "brighter",
+        "brightness", "by", "celsius", "close", "closed", "color", "cool",
+        "cooler", "decrease", "degree", "degrees", "dimmer", "dry", "fan",
+        "fahrenheit", "for", "from", "green", "halfway", "heat", "high", "in",
+        "increase", "kelvin", "level", "low", "lower", "medium", "mode", "of",
+        "on", "open", "openness", "percent", "position", "raise", "red", "set",
+        "speed", "temperature", "to", "value", "warm", "warmer", "white", "wind",
+        "yellow",
+        *{word for color in COLOR_RGB for word in normalize_text(color).split()},
+    }
+    operation_cues = {
+        "brightness", "celsius", "color", "degree", "degrees", "fahrenheit",
+        "halfway", "kelvin", "level", "mode", "openness", "percent", "position",
+        "speed", "temperature", "value", "wind",
+        *{word for color in COLOR_RGB for word in normalize_text(color).split()},
+    }
+
+    def selector_is_target_anchored(start: int) -> bool:
+        if state_command is None or start < state_command.end():
+            return False
+        actions = tuple(re.finditer(STATE_CHANGE_ACTION_RE, normalized[:start]))
+        bridge_start = actions[-1].end() if actions else state_command.end()
+        bridge = normalized[bridge_start:start]
+        for modifier in sorted(target_modifiers, key=len, reverse=True):
+            bridge = re.sub(
+                rf"(?<![a-z0-9]){re.escape(modifier)}(?![a-z0-9])",
+                " ",
+                bridge,
+            )
+        words = re.findall(r"[a-z0-9]+", bridge)
+        if all(word in target_fillers for word in words):
+            return True
+        if any(word in target_nouns for word in words):
+            return False
+        has_operation_cue = any(
+            word in operation_cues or word.isdigit()
+            for word in words
+        )
+        return has_operation_cue and all(
+            word in target_fillers
+            or word in operation_bridge_words
+            or word.isdigit()
+            for word in words
+        )
+
+    labels: dict[tuple[str, str], set[str]] = {}
+    for alias, domain in GENERIC_DEVICE_ALIASES.items():
+        labels.setdefault(("domain", normalize_text(alias)), set()).add(domain)
+    for entity in registry.entities:
+        labels.setdefault(("entity", normalize_text(entity.entity_id)), set()).add(
+            entity.domain
+        )
+        for alias in entity.aliases:
+            labels.setdefault(("alias", normalize_text(alias)), set()).add(entity.domain)
+        if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES:
+            labels.setdefault(("device", normalize_text(entity.device)), set()).add(
+                entity.domain
+            )
+
+    domains: set[str] = set()
+    for (category, label), owner_domains in labels.items():
+        if not label or len(owner_domains) != 1:
+            continue
+        for start, end, _value in _distinct_named_matches(normalized, (label,)):
+            if _selector_span_is_negative(normalized, start, end, selector_spans):
+                continue
+            if category == "domain" and any(
+                spatial_start <= start and end <= spatial_end
+                for spatial_start, spatial_end in spatial_spans
+            ):
+                continue
+            if not selector_is_target_anchored(start):
+                continue
+            if _label_is_grammar_collision(label) and not _selector_match_is_anchored(
+                normalized,
+                start,
+                end,
+                label,
+                category,
+                registry,
+            ):
+                continue
+            domains.update(owner_domains)
+            break
+    return frozenset(domains)
+
+
+def _selector_phrase_candidate_ids(
+    text: str,
+    start: int,
+    end: int,
+    registry: EntityRegistry,
+    selector_spans: Sequence[tuple[int, int]],
+) -> frozenset[str]:
+    """Resolve the bounded noun phrase containing one shared selector label."""
+
+    boundary_pattern = (
+        r"[!?;,:—]|\.(?![a-z0-9])|"
+        r"\b(?:and\s+then|then|but|rather|and|or)\b"
+    )
+    boundaries = tuple(
+        match
+        for match in re.finditer(boundary_pattern, text)
+        if not any(
+            selector_start < match.start() < selector_end
+            or selector_start < match.end() < selector_end
+            for selector_start, selector_end in selector_spans
+        )
+    )
+    phrase_start = max(
+        (match.end() for match in boundaries if match.end() <= start),
+        default=0,
+    )
+    phrase_end = min(
+        (match.start() for match in boundaries if match.start() >= end),
+        default=len(text),
+    )
+    phrase = text[phrase_start:phrase_end]
+    relative_start = start - phrase_start
+    predicate = (
+        rf"\b(?:{SELECTOR_ACTION_RE}|{EXECUTION_CONTROL_ACTION_RE}|want|need|have|"
+        r"avoid|without|except|besides|not|no|using|selecting|choosing|touching)\b"
+    )
+    predicates = tuple(re.finditer(predicate, phrase[:relative_start]))
+    if predicates:
+        phrase = phrase[predicates[-1].end():]
+    selector = _explicit_selector_match(
+        registry,
+        phrase,
+        allow_bare_meaningful=True,
+    )
+    if not selector.present or selector.conflicting_slots or not selector.candidates:
+        return frozenset()
+    return frozenset(entity.entity_id for entity in selector.candidates)
+
+
 def _negated_entity_ids(registry: EntityRegistry, utterance: str) -> tuple[str, ...]:
     normalized = normalize_text(utterance)
+    selector_spans = _registry_selector_spans(normalized, registry)
+    # A later state command reverses a domain-wide exclusion only when that
+    # command itself positively names the domain or a domain-specific stable
+    # selector.  A bare action, ``a device``, room, or floor cannot silently
+    # make an excluded domain eligible for clarification again.
+    authorization_clause = _final_authorization_clause(normalized, registry)
+    excluded_domains = set(_excluded_generic_domains(normalized, registry))
+    if _has_universal_generic_exclusion(normalized, registry):
+        excluded_domains.update(SUPPORTED_DOMAINS)
+    if (
+        authorization_clause != normalized
+        and re.match(rf"{STATE_COMMAND_RE}\b", authorization_clause)
+    ):
+        excluded_domains.difference_update(
+            _positive_target_domains(authorization_clause, registry)
+        )
+
+    label_owners: dict[str, set[str]] = {}
+    for entity in registry.entities:
+        labels = (entity.entity_id, entity.room, entity.floor, entity.device, *entity.aliases)
+        for label in labels:
+            normalized_label = normalize_text(label)
+            if normalized_label:
+                label_owners.setdefault(normalized_label, set()).add(entity.entity_id)
+
+    def label_excludes(entity_id: str, label: str) -> bool:
+        normalized_label = normalize_text(label)
+        if not _label_is_excluded(
+            normalized,
+            normalized_label,
+            selector_spans=selector_spans,
+        ):
+            return False
+        if len(label_owners.get(normalized_label, ())) <= 1:
+            return True
+        scoped_matches = tuple(
+            (start, end)
+            for start, end, _value in _distinct_named_matches(
+                normalized,
+                (normalized_label,),
+            )
+            if _selector_span_is_negative(
+                normalized,
+                start,
+                end,
+                selector_spans,
+            )
+        )
+        if not scoped_matches:
+            # Preserve the previous fail-closed behavior for exclusion forms
+            # recognized by the fallback grammar (for example ``leave X
+            # unchanged``) but not by the general negative-scope parser.
+            return True
+        for start, end in scoped_matches:
+            phrase_ids = _selector_phrase_candidate_ids(
+                normalized,
+                start,
+                end,
+                registry,
+                selector_spans,
+            )
+            if not phrase_ids or entity_id in phrase_ids:
+                return True
+        return False
+
     excluded: list[str] = []
     for entity in registry.entities:
-        labels = (entity.room, entity.floor, entity.device, *entity.aliases)
-        if any(
-            _label_is_excluded(normalized, label)
+        labels = (
+            entity.entity_id,
+            entity.room,
+            entity.floor,
+            entity.device,
+            *entity.aliases,
+        )
+        if entity.domain in excluded_domains or any(
+            label_excludes(entity.entity_id, label)
             for label in labels
-            if normalize_text(label) not in {"light", "curtain", "ac"}
+            if normalize_text(label) not in GENERIC_DEVICE_ALIASES
         ):
             excluded.append(entity.entity_id)
     return tuple(sorted(set(excluded)))
@@ -1713,19 +2648,56 @@ def _operational_text(text: str, entities: Sequence[EntitySpec]) -> str:
     """Remove registry selector spans before interpreting values or attributes."""
 
     result = normalize_text(text)
-    labels: set[str] = set()
+    labels: dict[str, bool] = {}
     for entity in entities:
-        values = [entity.room, entity.floor, *entity.aliases]
+        for value in (entity.room, entity.floor):
+            normalized_value = normalize_text(value)
+            if normalized_value:
+                labels.setdefault(normalized_value, True)
+        values = [*entity.aliases]
         if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES:
             values.append(entity.device)
-        labels.update(normalize_text(value) for value in values if normalize_text(value))
+        for value in values:
+            normalized_value = normalize_text(value)
+            if normalized_value:
+                labels[normalized_value] = False
     for label in sorted(labels, key=len, reverse=True):
+        spatial_prefix = (
+            r"(?:(?<!turn\s)(?<!switch\s)\b(?:in|on|at|from)\s+)?"
+            if labels[label]
+            else ""
+        )
         result = re.sub(
-            rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])",
+            rf"(?<![a-z0-9]){spatial_prefix}{re.escape(label)}(?![a-z0-9])",
             " ",
             result,
         )
     return " ".join(result.split())
+
+
+def _authorized_operational_text(
+    text: str,
+    registry: EntityRegistry,
+    entities: Sequence[EntitySpec],
+) -> str:
+    """Return only operation evidence that remains authorized after a restart.
+
+    A pure selector correction (``do not use Living, I mean Study``) keeps the
+    operation stated before that correction.  A new state-command clause after
+    a withdrawal replaces the earlier operation instead: any action, attribute,
+    value, or unit must then be present in that clause or in the clarification
+    answer.  This prevents an incomplete restart such as ``adjust Study`` from
+    borrowing a withdrawn ``turn off`` action from an earlier clause.
+    """
+
+    normalized = normalize_text(text)
+    authorization_clause = _final_authorization_clause(normalized, registry)
+    if (
+        authorization_clause != normalized
+        and re.match(rf"{STATE_COMMAND_RE}\b", authorization_clause)
+    ):
+        return _operational_text(authorization_clause, entities)
+    return _operational_text(normalized, entities)
 
 
 def _clarification_operational_text(answer: str, chosen: EntitySpec) -> str:
@@ -1736,17 +2708,28 @@ def _clarification_operational_text(answer: str, chosen: EntitySpec) -> str:
         alias for alias, domain in GENERIC_DEVICE_ALIASES.items()
         if domain == chosen.domain
     )
-    labels = (
+    labels: dict[str, bool] = {}
+    for value in (chosen.room, chosen.floor):
+        normalized_value = normalize_text(value)
+        if normalized_value:
+            labels.setdefault(normalized_value, True)
+    for value in (
         chosen.entity_id,
-        chosen.room,
-        chosen.floor,
         chosen.device,
         *chosen.aliases,
         *generic_device_labels,
-    )
-    for label in sorted({normalize_text(value) for value in labels if normalize_text(value)}, key=len, reverse=True):
+    ):
+        normalized_value = normalize_text(value)
+        if normalized_value:
+            labels[normalized_value] = False
+    for label in sorted(labels, key=len, reverse=True):
+        spatial_prefix = (
+            r"(?:(?<!turn\s)(?<!switch\s)\b(?:in|on|at|from)\s+)?"
+            if labels[label]
+            else ""
+        )
         result = re.sub(
-            rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])",
+            rf"(?<![a-z0-9]){spatial_prefix}{re.escape(label)}(?![a-z0-9])",
             " ",
             result,
         )
@@ -1884,10 +2867,15 @@ def _explicit_selector_match(
         "alias": tuple(alias for entity in registry.entities for alias in entity.aliases),
         "entity": tuple(entity.entity_id for entity in registry.entities),
     }
+    selector_spans = _registry_selector_spans(normalized, registry)
     matches = {
         category: tuple(
             match
-            for match in _positive_named_matches(normalized, values)
+            for match in _positive_named_matches(
+                normalized,
+                values,
+                selector_spans=selector_spans,
+            )
             if _selector_match_is_anchored(
                 normalized,
                 match[0],
@@ -1900,6 +2888,24 @@ def _explicit_selector_match(
         )
         for category, values in labels.items()
     }
+    # A generic device word can be part of a registered spatial label (for
+    # example ``AC Room`` or ``Light Room``).  Once the complete room/floor
+    # label is anchored, that contained token is spatial metadata, not a
+    # second device-domain selector.  A separate target token outside the
+    # spatial span remains available and is still intersected below.
+    spatial_spans = tuple(
+        (start, end)
+        for category in ("room", "floor")
+        for start, end, _value in matches[category]
+    )
+    matches["domain"] = tuple(
+        match
+        for match in matches["domain"]
+        if not any(
+            spatial_start <= match[0] and match[1] <= spatial_end
+            for spatial_start, spatial_end in spatial_spans
+        )
+    )
     longer_specific_spans = tuple(
         (start, end)
         for category in ("device", "alias", "entity")
@@ -2142,7 +3148,12 @@ def ground_domux_request(
     context = context or SessionContext()
     source = parse_domux_output(raw_output)
     selectors, candidates = _request_candidates(utterance, source, registry, context)
-    operational_utterance = _operational_text(utterance, candidates or registry.entities)
+    authorization_utterance = _final_authorization_clause(utterance, registry)
+    operational_utterance = _authorized_operational_text(
+        utterance,
+        registry,
+        candidates or registry.entities,
+    )
     negated_entity_ids = _negated_entity_ids(registry, utterance)
     excluded_value_tokens = _excluded_operation_value_tokens(utterance, source)
     reasons: list[str] = []
@@ -2165,7 +3176,7 @@ def ground_domux_request(
     if explicit_selector.conflicting_slots:
         reasons.append("multiple_explicit_selectors")
         unresolved.extend(explicit_selector.conflicting_slots)
-    if _has_negative_or_cancelled_intent(utterance):
+    if _has_negative_or_cancelled_intent(authorization_utterance):
         reasons.append("negative_or_cancelled_intent")
     if not _has_supported_request_grammar(utterance, registry, source):
         reasons.append("unsupported_request_grammar")
@@ -2190,8 +3201,8 @@ def ground_domux_request(
         reasons.append("stale_context_reference")
         unresolved.append("context")
     if (
-        _has_unresolved_generic_exclusion(utterance)
-        and not negated_entity_ids
+        _has_unresolved_generic_exclusion(authorization_utterance, registry)
+        and not _excluded_generic_domains(authorization_utterance, registry)
         and not (other_reference and len(valid_context_ids) >= 2)
     ):
         reasons.append("unsupported_request_grammar")
@@ -2318,13 +3329,23 @@ def ground_domux_request(
     )
 
 
-def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> EntitySpec:
+def resolve_clarification(
+    answer: str,
+    candidates: Sequence[EntitySpec],
+    *,
+    registry: EntityRegistry | None = None,
+) -> EntitySpec:
     if not isinstance(answer, str) or not answer.strip():
         raise GroundingError("clarification answer is empty")
     if not candidates:
         raise GroundingError("clarification has no candidates")
     answer_norm = normalize_text(answer)
     answer_registry = EntityRegistry(candidates)
+    scope_registry = registry or answer_registry
+    answer_selector_spans = _registry_selector_spans(
+        answer_norm,
+        scope_registry,
+    )
     answer_selector = _explicit_selector_match(
         answer_registry,
         answer,
@@ -2334,13 +3355,13 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
         answer_selector.conflicting_slots or not answer_selector.candidates
     ):
         raise GroundingError("clarification answer has inconsistent target selectors")
-    if _has_unresolved_generic_exclusion(answer_norm):
+    if _has_unresolved_generic_exclusion(answer_norm, scope_registry):
         selected = (
             answer_selector.candidates[0]
             if len(answer_selector.candidates) == 1
             else None
         )
-        excluded_domains = _excluded_generic_domains(answer)
+        excluded_domains = _excluded_generic_domains(answer, scope_registry)
         if not (
             answer_selector.discriminating
             and selected is not None
@@ -2373,12 +3394,16 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
         if normalize_text(candidate.device) not in GENERIC_DEVICE_ALIASES:
             exclusion_labels.append(candidate.device)
         for label in exclusion_labels:
-            if _label_is_excluded(answer_norm, label):
+            if _label_is_excluded(
+                answer_norm,
+                label,
+                selector_spans=answer_selector_spans,
+            ):
                 raise GroundingError("clarification answer excludes the only candidate")
         if _answer_is_noncommittal(answer_norm):
             raise GroundingError("clarification answer is noncommittal")
         identifies_candidate = any(
-            _selector_label_evidence(answer, label, category, EntityRegistry(candidates))
+            _selector_label_evidence(answer, label, category, scope_registry)
             for category, label in (
                 ("entity", candidate.entity_id),
                 ("room", candidate.room),
@@ -2405,7 +3430,6 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
             key = (kind, normalize_text(value))
             feature_counts[key] = feature_counts.get(key, 0) + 1
     scored: list[tuple[int, EntitySpec]] = []
-    candidate_registry = EntityRegistry(candidates)
     selector_candidate_ids = {
         entity.entity_id for entity in answer_selector.candidates
     } if answer_selector.present else {entity.entity_id for entity in candidates}
@@ -2417,7 +3441,11 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
         if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES:
             exclusion_labels.append(entity.device)
         for label in exclusion_labels:
-            if _label_is_excluded(answer_norm, label):
+            if _label_is_excluded(
+                answer_norm,
+                label,
+                selector_spans=answer_selector_spans,
+            ):
                 negative = True
         if negative:
             continue
@@ -2433,11 +3461,11 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
                 "domain" if normalize_text(value) in GENERIC_DEVICE_ALIASES else kind
             )
             if feature_counts[key] < len(candidates) and _selector_label_evidence(
-                answer, value, selector_category, candidate_registry,
+                answer, value, selector_category, scope_registry,
             ):
                 score += weight
         score += 10 * sum(
-            _selector_label_evidence(answer, alias, "alias", candidate_registry)
+            _selector_label_evidence(answer, alias, "alias", scope_registry)
             for alias in entity.aliases
         )
         if score:
@@ -2555,6 +3583,7 @@ def _validate_confirmed_instruction(
     registry: EntityRegistry,
 ) -> None:
     answer_normalized = normalize_text(answer)
+    answer_selector_spans = _registry_selector_spans(answer_normalized, registry)
     if _answer_cancels(answer_normalized) or _has_negative_or_cancelled_intent(answer) or any(
         _phrase_in(answer_normalized, phrase)
         for phrase in ("do not act", "do not execute", "don't act", "don't execute")
@@ -2566,11 +3595,20 @@ def _validate_confirmed_instruction(
         raise GroundingError("clarification answer is informational, not an authorization")
     if chosen.entity_id in grounded.negated_entity_ids:
         raise GroundingError("clarification selected an entity explicitly excluded by the user")
-    chosen_exclusion_labels = [chosen.room, chosen.floor, *chosen.aliases]
+    chosen_exclusion_labels = [
+        chosen.entity_id,
+        chosen.room,
+        chosen.floor,
+        *chosen.aliases,
+    ]
     if normalize_text(chosen.device) not in GENERIC_DEVICE_ALIASES:
         chosen_exclusion_labels.append(chosen.device)
     if any(
-        _label_is_excluded(answer_normalized, label)
+        _label_is_excluded(
+            answer_normalized,
+            label,
+            selector_spans=answer_selector_spans,
+        )
         for label in chosen_exclusion_labels
     ):
         raise GroundingError("clarification answer explicitly excludes the selected entity")
@@ -2637,8 +3675,9 @@ def _validate_confirmed_instruction(
     confirmed_candidates = registry.candidates(confirmed)
     if tuple(entity.entity_id for entity in confirmed_candidates) != (chosen.entity_id,):
         raise GroundingError("confirmed instruction does not resolve uniquely to the selected entity")
-    operational_utterance = _operational_text(
+    operational_utterance = _authorized_operational_text(
         grounded.utterance,
+        registry,
         grounded.candidates or registry.entities,
     )
     answer_conflicts = _operational_conflicts(operational_answer, confirmed)
@@ -2647,8 +3686,9 @@ def _validate_confirmed_instruction(
         raise GroundingError(f"clarification answer has unresolved operational conflicts: {detail}")
     evidence = f"{operational_utterance}\n{operational_answer}"
     original_conflicts = set(_operational_conflicts(operational_utterance, confirmed))
-    if not _action_supported(evidence, confirmed) and not (
-        "action" in original_conflicts and _action_supported(operational_answer, confirmed)
+    if not (
+        _action_supported(evidence, confirmed)
+        or _action_supported(operational_answer, confirmed)
     ):
         raise GroundingError("confirmed action is not supported by the user text")
     if not _attribute_supported_for_entity(evidence, confirmed, chosen):
@@ -2771,7 +3811,7 @@ def _answer_cancels(answer_normalized: str) -> bool:
             r"stop(?:\s+(?:it|that|this))?|not\s+now|wait|hold(?:\s+on)?|"
             r"(?:do\s+not|don't)\s+(?:do|proceed|act|execute)\b(?:.{0,20}\byet\b)?|"
             r"(?:do\s+not|don't|rather\s+not)\s+(?:go\s+ahead|proceed|do|act|execute|"
-            r"turn|switch|open|close|set|change|make|adjust|touch)\b|"
+            r"turn|switch|open|close|set|change|make|move|adjust|touch)\b|"
             r"(?:i\s+)?(?:do\s+not|don't)\s+want\b|"
             r"forget\s+(?:it|that|this)|(?:i\s+)?changed?\s+my\s+mind|"
             r"not\s+(?:anymore|any\s+longer)|skip\s+(?:it|that|this)|"
@@ -2817,19 +3857,21 @@ def resolve_clarification_submission(
         raise GroundingError("clarification answer is noncommittal")
     if len(grounded.candidates) > len(grounded.clarification.candidates):
         raise GroundingError("candidate set is not narrow enough to present safely")
-    answer_normalized = normalize_text(answer)
-    for entity_id in grounded.negated_entity_ids:
-        excluded = registry.get(entity_id)
-        labels = [excluded.entity_id, excluded.room, *excluded.aliases]
-        if normalize_text(excluded.device) not in GENERIC_DEVICE_ALIASES:
-            labels.append(excluded.device)
-        if any(
-            _phrase_in(answer_normalized, label)
-            and not _label_is_excluded(answer_normalized, label)
-            for label in labels
-        ):
-            raise GroundingError("clarification selects an explicitly excluded entity")
-    chosen = resolve_clarification(answer, grounded.candidates)
+    answer_selector = _explicit_selector_match(
+        registry,
+        answer,
+        allow_bare_meaningful=True,
+    )
+    if answer_selector.candidates and all(
+        entity.entity_id in grounded.negated_entity_ids
+        for entity in answer_selector.candidates
+    ):
+        raise GroundingError("clarification selects an explicitly excluded entity")
+    chosen = resolve_clarification(
+        answer,
+        grounded.candidates,
+        registry=registry,
+    )
     _validate_confirmed_instruction(grounded, answer, confirmed_instruction, chosen, registry)
     clarification_digest = digest_json({
         "request_digest": grounded.request_digest,
@@ -3100,10 +4142,19 @@ def build_plan(
             current = float(before.get("brightness", 0)) * 100 / 255
             step = 10.0 if value == "*" else _numeric(value, minimum=0, maximum=100)
             target = min(100.0, current + step) if action == "adjustup" else max(0.0, current - step)
-            service_data["brightness_pct"] = round(target, 2)
+            # Bind the postcondition to the value actually sent to Home
+            # Assistant.  Rounding only the service payload can otherwise
+            # create a one-level mismatch at half-step boundaries (for
+            # example, 128/255 minus 10 percent).
+            dispatched_target = round(target, 2)
+            service_data["brightness_pct"] = dispatched_target
             service = "turn_on"
-            expected["state"] = "off" if target == 0 else "on"
-            expected["brightness"] = None if target == 0 else round(target * 255 / 100)
+            expected["state"] = "off" if dispatched_target == 0 else "on"
+            expected["brightness"] = (
+                None
+                if dispatched_target == 0
+                else round(dispatched_target * 255 / 100)
+            )
         else:
             raise GroundingError(f"unsupported light operation: {instruction.to_pipe()}")
     elif entity.domain == "cover":
