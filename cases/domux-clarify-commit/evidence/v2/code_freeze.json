@@ -1,0 +1,71 @@
+{
+  "authority": "content-addressed-source-bundle",
+  "bundle_sha256": "4aabef262570c4fce5e2531e72abc7681052e0a686302e07123bef88ef384833",
+  "evidence_version": "v2-post-formal-exploratory",
+  "files": {
+    "clarify_commit.py": {
+      "sha256": "2893b35eea9365df01a34b60ad8eb378bee37e4338195f26634a1f45e0e45d81",
+      "size_bytes": 180386
+    },
+    "data/DATA_CARD.md": {
+      "sha256": "a877a3f348afb111d6f4ad8c30d453fec969828fd180496125a475258f752855",
+      "size_bytes": 6677
+    },
+    "evaluate.py": {
+      "sha256": "7c79cf0976cd33260e95397fcbb55fd8ac320b199eb54379b897dd8f6a41c941",
+      "size_bytes": 58886
+    },
+    "evidence/v2/policy_plan.json": {
+      "sha256": "b1727d6eb47367522a54ed1d1b5b1d200c8d5b9fbd30c7fd830de1a607f89302",
+      "size_bytes": 2140
+    },
+    "ha_acceptance.py": {
+      "sha256": "895059a2bc065f164b68e680164bcffe28bc47a7493695912012a8b9230ca021",
+      "size_bytes": 45850
+    },
+    "replay_policy.py": {
+      "sha256": "cb61a28999dbfdaeb35a61550899e5a95afb547fbb17c5bd926fd2b386457eb3",
+      "size_bytes": 40591
+    },
+    "requirements.txt": {
+      "sha256": "0a2d2262cb81ebf03c2c716b682f6a0dcdc183477c4316a161dcb8ec3fea480a",
+      "size_bytes": 238
+    },
+    "run_model.py": {
+      "sha256": "bf07dff14d69bcb9eca60322636740d46f0ef6655dacaa458f7a02434db9fa35",
+      "size_bytes": 20919
+    },
+    "tests/test_clarify_commit.py": {
+      "sha256": "b1e7c10d603eba89e8684b70ead16906b2a5ffa5c41801c0416b456ef01bbfe7",
+      "size_bytes": 137509
+    },
+    "tests/test_dataset.py": {
+      "sha256": "c1d9a2d06dac428b8004524ec12c2dfe5121bddcc7bf07f86e7fd4dbd59f9fd7",
+      "size_bytes": 8315
+    },
+    "tests/test_evaluate.py": {
+      "sha256": "5dc3aedab778a7d140a1f0ff44dd37bca71d8f8d1d59e253fdd088a3d40c9f9d",
+      "size_bytes": 18249
+    },
+    "tests/test_ha_acceptance.py": {
+      "sha256": "93b13fe1ec5085a2388a92b71ffcd38eefa9121e20c817d12b624894161da8a2",
+      "size_bytes": 30448
+    },
+    "tests/test_replay_policy.py": {
+      "sha256": "cbedf9e77b43bb408c1c39110138d7a6abbdbcd6f7219736db13c3c90138a27c",
+      "size_bytes": 19276
+    },
+    "tests/test_run_model.py": {
+      "sha256": "4bd5bdf70dd10d0b85b221282a9dc18566caf2eb6f4bbdd8fb3c4ca812bbd47d",
+      "size_bytes": 9904
+    }
+  },
+  "fork_git_provenance": {
+    "role": "informational-only; content hashes are authoritative",
+    "source_commit": "09cd5adbd4545c244c2366616f9709493c36931e"
+  },
+  "hash_algorithm": "sha256",
+  "manifest_type": "domux-v2-code-freeze",
+  "schema_version": 1,
+  "status": "frozen-before-official-replay"
+}
