@@ -219,9 +219,7 @@ class FakeRestBackend:
             },
         }
         self.setup_dispatches: list[dict[str, Any]] = []
-        self.external_dispatches: list[dict[str, Any]] = []
         self.sut_http_dispatches: list[dict[str, Any]] = []
-        self.service_events: list[dict[str, Any]] = []
 
     def state(self, entity_id: str) -> dict[str, Any]:
         result = json.loads(json.dumps(self.states[entity_id]))
@@ -261,15 +259,10 @@ class FakeRestBackend:
         else:
             raise AssertionError(f"unexpected synthetic service: {domain}.{service}")
         event = {"data": dict(data), "domain": domain, "service": service}
-        self.service_events.append({**event, "phase": phase})
         if phase == "setup":
             self.setup_dispatches.append(event)
-        elif phase == "external_fault_injection":
-            self.external_dispatches.append(event)
-        elif phase == "sut":
-            self.sut_http_dispatches.append(event)
         else:
-            raise AssertionError(f"unexpected synthetic service phase: {phase}")
+            self.sut_http_dispatches.append(event)
         return self.state(entity_id)
 
     def open(self, request: Any, *, timeout: float) -> FakeRestResponse:
@@ -317,7 +310,6 @@ class FakeHomeAssistantApi:
         self.backend = backend or FakeRestBackend()
         self.steps: set[str] = set()
         self.revoked = False
-        self.direct_service_calls: list[dict[str, object]] = []
 
     @staticmethod
     def _onboarding(done: bool) -> list[dict[str, Any]]:
@@ -331,7 +323,7 @@ class FakeHomeAssistantApi:
         if set(entity_ids) != set(self.backend.states):
             raise AssertionError("runner requested unexpected entities")
 
-    def wait_for_projection(
+    def wait_for_setup_projection(
         self,
         entity_id: str,
         token: str,
@@ -347,35 +339,6 @@ class FakeHomeAssistantApi:
         ):
             raise AssertionError("synthetic setup projection does not match")
         return actual
-
-    def call_service(
-        self,
-        domain: str,
-        service: str,
-        data: dict[str, Any],
-        token: str,
-        *,
-        evidence_phase: str,
-    ) -> ha.HttpResult:
-        self._assert_token(token)
-        payload = [
-            self.backend.dispatch(
-                domain,
-                service,
-                data,
-                phase=evidence_phase,
-            )
-        ]
-        self.direct_service_calls.append(
-            ha._direct_service_event(
-                evidence_phase,
-                domain,
-                service,
-                f"/api/services/{domain}/{service}",
-                200,
-            )
-        )
-        return ha.HttpResult(200, payload)
 
     def _assert_token(self, token: str | None) -> None:
         if token != self.access_token:
@@ -588,29 +551,13 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         self.assertFalse(setup["included_in_sut_dispatch_count"])
         self.assertEqual(len(setup["dispatches"]), 4)
         self.assertEqual(len(backend.setup_dispatches), 4)
-        self.assertEqual(len(backend.external_dispatches), 1)
-        self.assertEqual(
-            backend.external_dispatches[0],
-            {
-                "data": {
-                    "brightness_pct": 25.0,
-                    "entity_id": "light.bed_light",
-                },
-                "domain": "light",
-                "service": "turn_on",
-            },
-        )
         self.assertEqual(sut["classification"], "clarify_commit_sut")
         self.assertEqual(sut["adapter"], "HomeAssistantRESTAdapter")
-        self.assertEqual(sut["case_count"], 4)
-        self.assertEqual(sut["successful_transition_count"], 3)
-        self.assertEqual(sut["rejected_before_dispatch_count"], 1)
-        self.assertEqual(sut["external_fault_injection_count"], 1)
         self.assertEqual(sut["sut_dispatch_total"], 3)
         self.assertEqual(len(backend.sut_http_dispatches), 3)
         self.assertEqual(
             [item["domain"] for item in sut["cases"]],
-            ["light", "cover", "climate", "light"],
+            ["light", "cover", "climate"],
         )
         self.assertEqual(
             [item["grounding"]["resolution"] for item in sut["cases"]],
@@ -618,12 +565,11 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
                 "resolve_clarification_submission",
                 "resolve_unique_request",
                 "resolve_unique_request",
-                "resolve_unique_request",
             ],
         )
         self.assertEqual(
             [item["service_shape"]["service"] for item in sut["cases"]],
-            ["turn_on", "set_cover_position", "set_temperature", "turn_on"],
+            ["turn_on", "set_cover_position", "set_temperature"],
         )
         self.assertEqual(
             backend.sut_http_dispatches,
@@ -654,20 +600,6 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(
-            [event["phase"] for event in backend.service_events],
-            ["setup"] * 4 + ["sut"] * 3 + ["external_fault_injection"],
-        )
-        accounting = result["phases"]["service_call_accounting"]
-        self.assertEqual(accounting["external_fault_injection"], 1)
-        self.assertEqual(accounting["setup_direct_rest"], 4)
-        self.assertEqual(accounting["sut_dispatches"], 3)
-        self.assertEqual(accounting["total"], 8)
-        self.assertEqual(accounting["direct_rest_events"], api.direct_service_calls)
-        self.assertEqual(
-            [event["phase"] for event in accounting["direct_rest_events"]],
-            ["setup"] * 4 + ["external_fault_injection"],
-        )
         expected_transitions = {
             "clarified_light_brightness": (
                 {"brightness": 64, "state": "on"},
@@ -682,7 +614,7 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
                 {"state": "cool", "temperature": 23},
             ),
         }
-        for item in sut["cases"][:3]:
+        for item in sut["cases"]:
             expected_before, expected_after = expected_transitions[item["case"]]
             for key, value in expected_before.items():
                 self.assertTrue(
@@ -699,70 +631,6 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
             self.assertFalse(item["replay"]["dispatched"])
             self.assertEqual(item["replay"]["reason"], "replayed_nonce")
             self.assertEqual(item["replay"]["sut_dispatch_delta"], 0)
-            self.assertEqual(item["outcome"], "COMMITTED")
-
-        drift = sut["cases"][3]
-        self.assertEqual(drift["case"], "target_state_drift_rejected")
-        self.assertEqual(drift["outcome"], "REJECTED_BEFORE_DISPATCH")
-        self.assertEqual(
-            drift["external_mutation"],
-            {
-                "classification": "out_of_band_fault_injection",
-                "data": {
-                    "brightness_pct": 25.0,
-                    "entity_id": "light.bed_light",
-                },
-                "domain": "light",
-                "http_status": 200,
-                "included_in_sut_dispatch_count": False,
-                "observed_path": "/api/states/light.bed_light",
-                "request_path": "/api/services/light/turn_on",
-                "service": "turn_on",
-                "transport": "home_assistant_rest_api",
-            },
-        )
-        self.assertEqual(
-            drift["rejection"],
-            {
-                "acknowledged": False,
-                "accepted": False,
-                "dispatched": False,
-                "outcome_unknown": False,
-                "reason": "state_changed",
-                "status": "INVALIDATED",
-                "sut_dispatch_delta": 0,
-            },
-        )
-        self.assertEqual(
-            drift["controlled_before_external_mutation"]["brightness"],
-            128,
-        )
-        self.assertEqual(
-            drift["controlled_after_external_mutation"]["brightness"],
-            64,
-        )
-        self.assertEqual(
-            drift["controlled_before_external_mutation"],
-            sut["cases"][0]["controlled_after"],
-        )
-        binding = drift["binding"]
-        self.assertTrue(binding["matched_before_external_mutation"])
-        self.assertTrue(binding["changed_after_external_mutation"])
-        self.assertEqual(
-            binding["prepared_state_digest"],
-            binding["before_external_mutation_state_digest"],
-        )
-        self.assertNotEqual(
-            binding["prepared_state_digest"],
-            binding["after_external_mutation_state_digest"],
-        )
-        for field in (
-            "prepared_state_digest",
-            "before_external_mutation_state_digest",
-            "after_external_mutation_state_digest",
-        ):
-            self.assertEqual(len(binding[field]), 64)
-            self.assertTrue(set(binding[field]) <= set("0123456789abcdef"))
         serialized = json.dumps(result, sort_keys=True)
         for private in (
             "synthetic-user",
@@ -774,41 +642,6 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
             "45678",
         ):
             self.assertNotIn(private, serialized)
-
-    def test_target_drift_injection_must_be_external_and_observed(self) -> None:
-        for mode, expected_error in (
-            ("sut_adapter", "counted as a SUT dispatch"),
-            ("no_op", "mutated state"),
-        ):
-            with self.subTest(mode=mode):
-                backend = FakeRestBackend()
-                api = FakeHomeAssistantApi("http://127.0.0.1:45678", backend)
-                ha.normalize_setup_state(api, api.access_token)
-                adapter = backend.adapter(api.base_url, api.access_token)
-
-                def mutate(case: ha.TargetDriftCase) -> dict[str, object]:
-                    if mode == "sut_adapter":
-                        adapter.call_service(
-                            case.domain,
-                            case.mutation_service,
-                            case.mutation_service_data,
-                        )
-                    return {
-                        "classification": "out_of_band_fault_injection",
-                        "data": dict(case.mutation_service_data),
-                        "domain": case.domain,
-                        "http_status": 200,
-                        "included_in_sut_dispatch_count": False,
-                        "observed_path": f"/api/states/{case.entity_id}",
-                        "request_path": (
-                            f"/api/services/{case.domain}/{case.mutation_service}"
-                        ),
-                        "service": case.mutation_service,
-                        "transport": "home_assistant_rest_api",
-                    }
-
-                with self.assertRaisesRegex(ha.AcceptanceError, expected_error):
-                    ha.run_sut_cases(adapter, mutate_target=mutate)
 
     def test_execute_always_cleans_runtime_on_success_and_failure(self) -> None:
         backend = FakeRestBackend()
@@ -829,50 +662,6 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
                 api_factory=lambda base_url: FakeHomeAssistantApi(base_url),
             )
         self.assertTrue(failing.cleaned)
-
-    def test_production_direct_service_call_records_redacted_success(self) -> None:
-        observed: dict[str, object] = {}
-
-        def recording_opener(request: Any, *, timeout: float) -> FakeRestResponse:
-            observed.update({
-                "authorization": request.headers.get("Authorization"),
-                "body": json.loads(request.data),
-                "method": request.method,
-                "path": urlparse(request.full_url).path,
-                "timeout": timeout,
-            })
-            return FakeRestResponse([])
-
-        api = ha.HomeAssistantApi(
-            "http://127.0.0.1:45678",
-            opener=recording_opener,
-        )
-        result = api.call_service(
-            "light",
-            "turn_on",
-            {"brightness_pct": 25, "entity_id": "light.bed_light"},
-            "synthetic-access-secret",
-            evidence_phase="external_fault_injection",
-        )
-        self.assertEqual(result.status, 200)
-        self.assertEqual(observed["method"], "POST")
-        self.assertEqual(observed["path"], "/api/services/light/turn_on")
-        self.assertEqual(observed["authorization"], "Bearer synthetic-access-secret")
-        self.assertEqual(
-            observed["body"],
-            {"brightness_pct": 25, "entity_id": "light.bed_light"},
-        )
-        self.assertEqual(
-            api.direct_service_calls,
-            [{
-                "domain": "light",
-                "http_status": 200,
-                "phase": "external_fault_injection",
-                "request_path": "/api/services/light/turn_on",
-                "service": "turn_on",
-            }],
-        )
-        self.assertNotIn("synthetic-access-secret", json.dumps(api.direct_service_calls))
 
     def test_http_transport_failure_does_not_echo_url_or_bearer(self) -> None:
         def failing_opener(*_args: Any, **_kwargs: Any) -> Any:

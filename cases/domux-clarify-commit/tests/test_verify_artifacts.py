@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 CASE_DIR = Path(__file__).resolve().parents[1]
@@ -33,7 +35,11 @@ class ArtifactVerifierTests(unittest.TestCase):
         self.assertEqual(result["v3"]["frozen_reproductions"], 2)
         self.assertFalse(result["v3"]["model_rerun"])
         self.assertFalse(result["v3"]["official_v2_replay"])
-        self.assertEqual(result["home_assistant"]["sut_cases"], 3)
+        self.assertEqual(result["home_assistant"]["sut_cases"], 4)
+        self.assertEqual(result["home_assistant"]["successful_transitions"], 3)
+        self.assertEqual(result["home_assistant"]["rejected_before_dispatch"], 1)
+        self.assertEqual(result["home_assistant"]["sut_dispatch_total"], 3)
+        self.assertEqual(result["home_assistant"]["drift_sut_dispatch_delta"], 0)
 
     def test_cli_default_success_is_machine_readable(self) -> None:
         stdout = io.StringIO()
@@ -148,13 +154,21 @@ class ArtifactVerifierTests(unittest.TestCase):
                 verify_artifacts.verify_all(copied)
 
     def test_superseded_v2_source_archive_is_the_freeze_authority(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            copied = Path(temporary) / "case"
-            shutil.copytree(CASE_DIR, copied, ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"))
-            source = copied / "evidence" / "v2" / "code" / "clarify_commit.py"
-            source.write_bytes(source.read_bytes() + b"\n")
-            with self.assertRaisesRegex(VerificationError, "v2 source clarify_commit.py hash mismatch"):
-                verify_artifacts.verify_all(copied)
+        for relative in verify_artifacts.V2_ARCHIVED_SOURCE_FILES:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                source = copied / "evidence" / "v2" / "code" / relative
+                source.write_bytes(source.read_bytes() + b"\n")
+                with self.assertRaisesRegex(
+                    VerificationError,
+                    f"v2 source {relative} hash mismatch",
+                ):
+                    verify_artifacts.verify_all(copied)
 
     def test_pinned_ha_record_rejects_a_tampered_case_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -164,6 +178,63 @@ class ArtifactVerifierTests(unittest.TestCase):
             evidence.write_bytes(evidence.read_bytes() + b"\n")
             with self.assertRaisesRegex(VerificationError, "Home Assistant acceptance hash mismatch"):
                 verify_artifacts.verify_all(copied)
+
+        mutations = (
+            (
+                "aggregate",
+                lambda artifact: artifact["home_assistant"]["phases"]["sut"].update(
+                    {"case_count": 5}
+                ),
+                "HA acceptance case count mismatch",
+            ),
+            (
+                "binding",
+                lambda artifact: artifact["home_assistant"]["phases"]["sut"]["cases"][3][
+                    "binding"
+                ].update({
+                    "after_external_mutation_state_digest": artifact["home_assistant"][
+                        "phases"
+                    ]["sut"]["cases"][3]["binding"]["prepared_state_digest"],
+                }),
+                "HA target-drift state binding changed",
+            ),
+            (
+                "rejection",
+                lambda artifact: artifact["home_assistant"]["phases"]["sut"]["cases"][3][
+                    "rejection"
+                ].update({"sut_dispatch_delta": 1}),
+                "HA target-drift rejection changed",
+            ),
+            (
+                "ledger",
+                lambda artifact: artifact["home_assistant"]["phases"][
+                    "service_call_accounting"
+                ].update({"total": 7}),
+                "HA service-call accounting changed",
+            ),
+        )
+        for name, mutate, expected_error in mutations:
+            with self.subTest(semantic_tamper=name), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                evidence = copied / "evidence" / "ha_acceptance.json"
+                artifact = json.loads(evidence.read_text(encoding="utf-8"))
+                mutate(artifact)
+                payload = (
+                    json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n"
+                ).encode("utf-8")
+                evidence.write_bytes(payload)
+                with mock.patch.object(
+                    verify_artifacts,
+                    "PINNED_HA_ACCEPTANCE_SHA256",
+                    hashlib.sha256(payload).hexdigest(),
+                ), self.assertRaisesRegex(VerificationError, expected_error):
+                    verify_artifacts._verify_ha(copied)
 
     def test_pinned_v3_validation_rejects_a_tampered_case_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -178,7 +249,7 @@ class ArtifactVerifierTests(unittest.TestCase):
             with self.assertRaisesRegex(VerificationError, "v3 validation hash mismatch"):
                 verify_artifacts.verify_all(copied)
 
-    def test_v3_source_binding_rejects_current_policy_tampering(self) -> None:
+    def test_v3_source_binding_rejects_archived_policy_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             copied = Path(temporary) / "case"
             shutil.copytree(
@@ -186,7 +257,7 @@ class ArtifactVerifierTests(unittest.TestCase):
                 copied,
                 ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
             )
-            policy = copied / "clarify_commit.py"
+            policy = copied / "evidence" / "v3" / "code" / "clarify_commit.py"
             policy.write_bytes(policy.read_bytes() + b"\n")
             with self.assertRaisesRegex(
                 VerificationError,

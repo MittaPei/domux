@@ -14,7 +14,7 @@ import reproduce_v2  # noqa: E402
 
 
 class V2ReproductionTests(unittest.TestCase):
-    def test_staging_restores_the_two_superseded_source_files(self) -> None:
+    def test_staging_restores_the_four_superseded_source_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             staged = reproduce_v2._stage_case(CASE_DIR, Path(temporary))
             for relative in reproduce_v2.V2_OVERLAYS:

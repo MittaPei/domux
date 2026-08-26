@@ -30,7 +30,9 @@ from verify_artifacts import (
 CASE_DIR = Path(__file__).resolve().parent
 V2_OVERLAYS = (
     "clarify_commit.py",
+    "ha_acceptance.py",
     "tests/test_clarify_commit.py",
+    "tests/test_ha_acceptance.py",
 )
 
 

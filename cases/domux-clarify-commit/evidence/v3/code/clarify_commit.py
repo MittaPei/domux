@@ -21,13 +21,11 @@ import urllib.parse
 import urllib.request
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
-from functools import lru_cache
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 SLOTS = ("action", "device", "attribute", "value", "unit", "room", "floor")
 SUPPORTED_DOMAINS = frozenset({"light", "cover", "climate"})
-MAX_UTTERANCE_CHARS = 2048
 ENTITY_ID_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_]+$")
 GENERIC_DEVICE_ALIASES = {
     "light": "light",
@@ -90,7 +88,6 @@ OTHER_REFERENCE_RE = (
     rf"{GENERIC_REFERENCE_NOUN_RE})?|other(?!\s+than\b)"
     rf"(?:\s+[a-z0-9]+){{0,3}}\s+{GENERIC_REFERENCE_NOUN_RE})\b"
 )
-POSTPOSED_NO_MARKER_RE = r"\bno\b\s*(?:[,，:：—–.!?;。！？；-])"
 COLOR_RGB = {
     "blue": [0, 0, 255],
     "cyan": [0, 255, 255],
@@ -774,7 +771,7 @@ def _negative_clause_is_control_withdrawal(text: str) -> bool:
     ))
 
 
-def _selector_span_is_negative_base(
+def _selector_span_is_negative(
     normalized_text: str,
     start: int,
     end: int | None = None,
@@ -1026,166 +1023,6 @@ def _selector_span_is_negative_base(
     ):
         return False
     return True
-
-
-def _overlapping_selector_component(
-    seed: tuple[int, int],
-    selector_spans: Sequence[tuple[int, int]],
-) -> frozenset[tuple[int, int]]:
-    """Return the connected overlap component containing one selector span."""
-
-    component = {seed}
-    remaining = set(selector_spans) - component
-    changed = True
-    while changed:
-        changed = False
-        component_start = min(start for start, _end in component)
-        component_end = max(end for _start, end in component)
-        overlapping = {
-            span
-            for span in remaining
-            if span[0] < component_end and component_start < span[1]
-        }
-        if overlapping:
-            component.update(overlapping)
-            remaining.difference_update(overlapping)
-            changed = True
-    return frozenset(component)
-
-
-@lru_cache(maxsize=512)
-def _postposed_no_correction_analysis(
-    normalized_text: str,
-    selector_spans: tuple[tuple[int, int], ...],
-) -> tuple[tuple[tuple[tuple[int, int], str], ...], bool]:
-    """Analyze every ``old target, no, replacement`` component once.
-
-    A postposed ``no`` withdraws the preceding positive selector.  The next
-    selector becomes positive only when the text between ``no,`` and that
-    selector is a bounded correction introducer.  Unknown or negative
-    replacement language therefore withdraws the old target without silently
-    authorizing a new one.
-    """
-
-    spans = tuple(sorted(set(selector_spans)))
-    # ASCII hyphens have already become spaces in ``normalize_text``.  Match
-    # from the correction word itself so transcripts using ``-``, en/em dash,
-    # ASCII/CJK punctuation, or ``no:`` all retain the same safe semantics.
-    marker_pattern = POSTPOSED_NO_MARKER_RE
-    correction_gap = (
-        r"\s*(?:(?:actually|perhaps|rather|instead|sorry|please|just|the|this|that|"
-        r"my|your|our)\s+|(?:(?:i|we)\s+)?(?:mean|want|choose|select|use)\s+)*"
-    )
-    state_command_gap = rf"\s*(?:{STATE_COMMAND_RE})\s+(?:(?:the|this|that|my|your|our)\s+)?"
-    polite_selector_gap = (
-        rf"\s*(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:just\s+)?"
-        rf"{CORRECTION_SELECTOR_ACTION_RE}\s+"
-        r"(?:(?:the|this|that|my|your|our)\s+)?"
-    )
-    withdrawn: set[tuple[int, int]] = set()
-    replacements: set[tuple[int, int]] = set()
-    unsafe_replacement = False
-    for marker in re.finditer(marker_pattern, normalized_text):
-        before = tuple(span for span in spans if span[1] <= marker.start())
-        if not before:
-            continue
-        old_seed = max(before, key=lambda span: (span[1], span[0]))
-        old_component = _overlapping_selector_component(old_seed, spans)
-        old_was_positive_replacement = bool(old_component & replacements)
-        old_was_withdrawn = bool(old_component & withdrawn)
-        old_was_base_negative = (
-            False
-            if old_was_positive_replacement
-            else _selector_span_is_negative_base(
-                normalized_text,
-                old_seed[0],
-                old_seed[1],
-                spans,
-            )
-        )
-        if old_was_withdrawn or (
-            old_was_base_negative and not old_was_positive_replacement
-        ):
-            # ``do not use A—no, B`` is not a positive A-to-B correction.
-            continue
-        after = tuple(span for span in spans if span[0] >= marker.end())
-        if not after:
-            # ``no`` may be correcting a value or mode rather than the target
-            # (for example, ``Study Lamp to 30—no, perhaps 60``).  Without a
-            # later selector there is no evidence of a target correction.
-            continue
-        replacement_seed = min(after, key=lambda span: (span[0], -span[1]))
-        gap = normalized_text[marker.end():replacement_seed[0]]
-        positive_replacement = (
-            re.fullmatch(correction_gap, gap) is not None
-            or re.fullmatch(state_command_gap, gap) is not None
-            or re.fullmatch(polite_selector_gap, gap) is not None
-        )
-        withdrawn.update(old_component)
-        replacements.difference_update(old_component)
-        if not positive_replacement:
-            # Once both sides name stable selectors, an unknown or negative
-            # bridge cannot keep the old authorization alive or authorize the
-            # replacement.  The request-level gate below also prevents a
-            # clarification from expanding to some third, unmentioned target.
-            unsafe_replacement = True
-            continue
-        replacement_component = _overlapping_selector_component(
-            replacement_seed,
-            spans,
-        )
-        replacements.update(replacement_component)
-    roles = tuple(sorted(
-        (*((span, "withdrawn") for span in withdrawn),
-         *((span, "replacement") for span in replacements)),
-    ))
-    return roles, unsafe_replacement
-
-
-def _postposed_no_correction_role(
-    normalized_text: str,
-    start: int,
-    end: int,
-    selector_spans: Sequence[tuple[int, int]],
-) -> str | None:
-    """Return the cached postposed-correction role of one selector span."""
-
-    roles, _unsafe = _postposed_no_correction_analysis(
-        normalized_text,
-        tuple(sorted(set(selector_spans))),
-    )
-    current = (start, end)
-    for span, role in roles:
-        if span == current:
-            return role
-    return None
-
-
-def _selector_span_is_negative(
-    normalized_text: str,
-    start: int,
-    end: int | None = None,
-    selector_spans: Sequence[tuple[int, int]] = (),
-) -> bool:
-    """Apply postposed corrections before the general negative-scope rules."""
-
-    effective_end = start if end is None else end
-    role = _postposed_no_correction_role(
-        normalized_text,
-        start,
-        effective_end,
-        selector_spans,
-    )
-    if role == "withdrawn":
-        return True
-    if role == "replacement":
-        return False
-    return _selector_span_is_negative_base(
-        normalized_text,
-        start,
-        end,
-        selector_spans,
-    )
 
 
 def _positive_named_matches(
@@ -2135,27 +1972,8 @@ def _has_generic_domain_withdrawal(
     return False
 
 
-def _has_negative_selector_correction(
-    utterance: str,
-    registry: EntityRegistry,
-) -> bool:
-    """Detect a named-selector correction whose bridge is not safely positive."""
-
+def _has_negative_or_cancelled_intent(utterance: str) -> bool:
     normalized = normalize_text(utterance)
-    spans = tuple(_registry_selector_spans(normalized, registry))
-    _roles, unsafe = _postposed_no_correction_analysis(normalized, spans)
-    return unsafe
-
-
-def _has_negative_or_cancelled_intent(
-    utterance: str,
-    registry: EntityRegistry | None = None,
-) -> bool:
-    normalized = normalize_text(utterance)
-    ambiguous_negative_correction = (
-        registry is not None
-        and _has_negative_selector_correction(normalized, registry)
-    )
     negative_imperative = (
         _has_negative_action_authorization(normalized)
         or _has_negated_direction(normalized)
@@ -2215,7 +2033,6 @@ def _has_negative_or_cancelled_intent(
         or terminal_cancel
         or trailing_cancel
         or suspensive_wait
-        or ambiguous_negative_correction
     )
 
 
@@ -2553,41 +2370,15 @@ def _label_is_excluded(
     known_spans = tuple(selector_spans) or tuple(
         (start, end) for start, end, _value in matches
     )
-    correction_occurrences = tuple(
-        (start, end, role)
-        for start, end, _value in matches
-        if (role := _postposed_no_correction_role(
+    explicitly_scoped = any(
+        _selector_span_is_negative(
             normalized,
             start,
             end,
             known_spans,
-        )) is not None
+        )
+        for start, end, _value in matches
     )
-    if correction_occurrences:
-        latest_start, _latest_end, latest_role = max(
-            correction_occurrences,
-            key=lambda item: (item[1], item[0]),
-        )
-        explicitly_scoped = latest_role == "withdrawn" or any(
-            start > latest_start
-            and _selector_span_is_negative_base(
-                normalized,
-                start,
-                end,
-                known_spans,
-            )
-            for start, end, _value in matches
-        )
-    else:
-        explicitly_scoped = any(
-            _selector_span_is_negative(
-                normalized,
-                start,
-                end,
-                known_spans,
-            )
-            for start, end, _value in matches
-        )
     return explicitly_scoped or bool(re.search(
         rf"\b(?:not(?:\s+in)?|except|besides|other\s+than|anything\s+but|"
         rf"apart\s+from|instead\s+of)\s+(?:the\s+)?{re.escape(normalized_label)}\b|"
@@ -3354,8 +3145,6 @@ def ground_domux_request(
 ) -> GroundedRequest:
     if not isinstance(utterance, str) or not utterance.strip():
         raise GroundingError("user utterance is empty")
-    if len(utterance) > MAX_UTTERANCE_CHARS:
-        raise GroundingError("user utterance exceeds the supported length")
     context = context or SessionContext()
     source = parse_domux_output(raw_output)
     selectors, candidates = _request_candidates(utterance, source, registry, context)
@@ -3387,7 +3176,7 @@ def ground_domux_request(
     if explicit_selector.conflicting_slots:
         reasons.append("multiple_explicit_selectors")
         unresolved.extend(explicit_selector.conflicting_slots)
-    if _has_negative_or_cancelled_intent(authorization_utterance, registry):
+    if _has_negative_or_cancelled_intent(authorization_utterance):
         reasons.append("negative_or_cancelled_intent")
     if not _has_supported_request_grammar(utterance, registry, source):
         reasons.append("unsupported_request_grammar")

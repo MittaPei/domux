@@ -33,49 +33,6 @@
       }
     },
     "phases": {
-      "service_call_accounting": {
-        "direct_rest_events": [
-          {
-            "domain": "light",
-            "http_status": 200,
-            "phase": "setup",
-            "request_path": "/api/services/light/turn_on",
-            "service": "turn_on"
-          },
-          {
-            "domain": "cover",
-            "http_status": 200,
-            "phase": "setup",
-            "request_path": "/api/services/cover/set_cover_position",
-            "service": "set_cover_position"
-          },
-          {
-            "domain": "climate",
-            "http_status": 200,
-            "phase": "setup",
-            "request_path": "/api/services/climate/set_hvac_mode",
-            "service": "set_hvac_mode"
-          },
-          {
-            "domain": "climate",
-            "http_status": 200,
-            "phase": "setup",
-            "request_path": "/api/services/climate/set_temperature",
-            "service": "set_temperature"
-          },
-          {
-            "domain": "light",
-            "http_status": 200,
-            "phase": "external_fault_injection",
-            "request_path": "/api/services/light/turn_on",
-            "service": "turn_on"
-          }
-        ],
-        "external_fault_injection": 1,
-        "setup_direct_rest": 4,
-        "sut_dispatches": 3,
-        "total": 8
-      },
       "setup": {
         "classification": "direct_rest_state_normalization",
         "dispatches": [
@@ -105,7 +62,6 @@
       },
       "sut": {
         "adapter": "HomeAssistantRESTAdapter",
-        "case_count": 4,
         "cases": [
           {
             "case": "clarified_light_brightness",
@@ -141,7 +97,6 @@
               "resolution": "resolve_clarification_submission",
               "selected_entity_id": "light.bed_light"
             },
-            "outcome": "COMMITTED",
             "postcondition": {
               "all_registered_entities_exact": true,
               "matched_prepared_projection": true,
@@ -184,7 +139,6 @@
               "resolution": "resolve_unique_request",
               "selected_entity_id": "cover.hall_window"
             },
-            "outcome": "COMMITTED",
             "postcondition": {
               "all_registered_entities_exact": true,
               "matched_prepared_projection": true,
@@ -229,7 +183,6 @@
               "resolution": "resolve_unique_request",
               "selected_entity_id": "climate.hvac"
             },
-            "outcome": "COMMITTED",
             "postcondition": {
               "all_registered_entities_exact": true,
               "matched_prepared_projection": true,
@@ -250,83 +203,9 @@
               "domain": "climate",
               "service": "set_temperature"
             }
-          },
-          {
-            "binding": {
-              "after_external_mutation_state_digest": "80e68977cce90ffd209341d5cdd5fb029c287f2cc719802fd12abbc6ec6a7f06",
-              "before_external_mutation_state_digest": "bf343f777d3bbb8d7dd36a3d821f5e3c2f206a0d4f7fcfe54da9b043ec6ce7a4",
-              "changed_after_external_mutation": true,
-              "matched_before_external_mutation": true,
-              "prepared_state_digest": "bf343f777d3bbb8d7dd36a3d821f5e3c2f206a0d4f7fcfe54da9b043ec6ce7a4"
-            },
-            "case": "target_state_drift_rejected",
-            "controlled_after_external_mutation": {
-              "brightness": 64,
-              "color_temp_kelvin": 3000,
-              "entity_id": "light.bed_light",
-              "rgb_color": [
-                255,
-                177,
-                110
-              ],
-              "state": "on"
-            },
-            "controlled_before_external_mutation": {
-              "brightness": 128,
-              "color_temp_kelvin": 3000,
-              "entity_id": "light.bed_light",
-              "rgb_color": [
-                255,
-                177,
-                110
-              ],
-              "state": "on"
-            },
-            "domain": "light",
-            "external_mutation": {
-              "classification": "out_of_band_fault_injection",
-              "data": {
-                "brightness_pct": 25.0,
-                "entity_id": "light.bed_light"
-              },
-              "domain": "light",
-              "http_status": 200,
-              "included_in_sut_dispatch_count": false,
-              "observed_path": "/api/states/light.bed_light",
-              "request_path": "/api/services/light/turn_on",
-              "service": "turn_on",
-              "transport": "home_assistant_rest_api"
-            },
-            "grounding": {
-              "candidate_ids": [
-                "light.bed_light"
-              ],
-              "clarification_required": false,
-              "resolution": "resolve_unique_request",
-              "selected_entity_id": "light.bed_light"
-            },
-            "outcome": "REJECTED_BEFORE_DISPATCH",
-            "rejection": {
-              "accepted": false,
-              "acknowledged": false,
-              "dispatched": false,
-              "outcome_unknown": false,
-              "reason": "state_changed",
-              "status": "INVALIDATED",
-              "sut_dispatch_delta": 0
-            },
-            "service_shape": {
-              "data": {
-                "brightness_pct": 75.0,
-                "entity_id": "light.bed_light"
-              },
-              "domain": "light",
-              "service": "turn_on"
-            }
           }
         ],
         "classification": "clarify_commit_sut",
-        "external_fault_injection_count": 1,
         "pipeline": [
           "ground_domux_request",
           "resolve_clarification_submission_or_unique",
@@ -334,8 +213,6 @@
           "PreparedActionStore.commit",
           "HomeAssistantRESTAdapter.call_service"
         ],
-        "rejected_before_dispatch_count": 1,
-        "successful_transition_count": 3,
         "sut_dispatch_total": 3
       },
       "teardown": {
@@ -366,6 +243,6 @@
     "random_loopback_binding": true,
     "restart_policy": "no"
   },
-  "schema_version": 2,
+  "schema_version": 1,
   "status": "passed"
 }

@@ -33,14 +33,11 @@ from clarify_commit import (
     EntitySpec,
     HomeAssistantRESTAdapter,
     PreparedActionStore,
-    controlled_projection,
-    digest_json,
     ground_domux_request,
     parse_domux_output,
     projection_matches,
     resolve_clarification_submission,
     resolve_unique_request,
-    state_binding,
 )
 
 
@@ -129,23 +126,6 @@ class SutCase:
     expected_after: Mapping[str, object]
 
 
-@dataclass(frozen=True)
-class TargetDriftCase:
-    """One prepared action invalidated by a real out-of-band HA state change."""
-
-    name: str
-    domain: str
-    entity_id: str
-    utterance: str
-    raw_output: str
-    expected_service: str
-    expected_service_data: Mapping[str, object]
-    expected_bound_state: Mapping[str, object]
-    mutation_service: str
-    mutation_service_data: Mapping[str, object]
-    expected_drifted_state: Mapping[str, object]
-
-
 SUT_CASES = (
     SutCase(
         name="clarified_light_brightness",
@@ -199,29 +179,6 @@ SUT_CASES = (
         expected_before={"state": "cool", "temperature": 21},
         expected_after={"state": "cool", "temperature": 23},
     ),
-)
-
-TARGET_DRIFT_CASE = TargetDriftCase(
-    name="target_state_drift_rejected",
-    domain="light",
-    entity_id="light.bed_light",
-    utterance=(
-        "Set the brightness of the Bed Light in the Bedroom on the Ground Floor "
-        "to 75 percent."
-    ),
-    raw_output="set|Bed Light|brightness|75|Percent|Bedroom|Ground Floor",
-    expected_service="turn_on",
-    expected_service_data={
-        "brightness_pct": 75.0,
-        "entity_id": "light.bed_light",
-    },
-    expected_bound_state={"brightness": 128, "state": "on"},
-    mutation_service="turn_on",
-    mutation_service_data={
-        "brightness_pct": 25.0,
-        "entity_id": "light.bed_light",
-    },
-    expected_drifted_state={"brightness": 64, "state": "on"},
 )
 
 
@@ -571,7 +528,6 @@ class HomeAssistantApi:
         self._opener = opener
         self._monotonic = monotonic
         self._sleep = sleep
-        self.direct_service_calls: list[dict[str, object]] = []
 
     def request(
         self,
@@ -626,37 +582,6 @@ class HomeAssistantApi:
             raise AcceptanceError(f"{method} {path} returned unexpected HTTP {status}")
         return HttpResult(status=status, payload=payload)
 
-    def call_service(
-        self,
-        domain: str,
-        service: str,
-        data: Mapping[str, Any],
-        token: str,
-        *,
-        evidence_phase: str,
-    ) -> HttpResult:
-        """Call the official HA REST service endpoint with an explicit audit phase."""
-
-        if evidence_phase not in {"setup", "external_fault_injection"}:
-            raise ValueError("unsupported direct-service evidence phase")
-        path = f"/api/services/{domain}/{service}"
-        result = self.request(
-            "POST",
-            path,
-            json_body=data,
-            token=token,
-        )
-        self.direct_service_calls.append(
-            _direct_service_event(
-                evidence_phase,
-                domain,
-                service,
-                path,
-                result.status,
-            )
-        )
-        return result
-
     def wait_for_readiness(self) -> HttpResult:
         deadline = self._monotonic() + READINESS_TIMEOUT_SECONDS
         while True:
@@ -703,7 +628,7 @@ class HomeAssistantApi:
                 raise AcceptanceError(f"{entity_id} did not reach the expected state")
             self._sleep(0.25)
 
-    def wait_for_projection(
+    def wait_for_setup_projection(
         self,
         entity_id: str,
         token: str,
@@ -711,7 +636,7 @@ class HomeAssistantApi:
         state: str,
         attributes: Mapping[str, object],
     ) -> dict[str, Any]:
-        """Wait for fields changed by a direct-REST setup or fault injection."""
+        """Wait only for direct-REST setup fields, never for a SUT outcome."""
 
         deadline = self._monotonic() + STATE_TIMEOUT_SECONDS
         while True:
@@ -760,38 +685,17 @@ def _service_call(
     service: str,
     entity_id: str,
     token: str,
-    *,
-    evidence_phase: str,
     extra: Mapping[str, Any] | None = None,
 ) -> int:
     body: dict[str, Any] = {"entity_id": entity_id}
     if extra:
         body.update(extra)
-    return api.call_service(
-        domain,
-        service,
-        body,
-        token,
-        evidence_phase=evidence_phase,
+    return api.request(
+        "POST",
+        f"/api/services/{domain}/{service}",
+        json_body=body,
+        token=token,
     ).status
-
-
-def _direct_service_event(
-    phase: str,
-    domain: str,
-    service: str,
-    request_path: str,
-    http_status: int,
-) -> dict[str, object]:
-    """Build one credential-free record for a successful direct REST call."""
-
-    return {
-        "domain": domain,
-        "http_status": http_status,
-        "phase": phase,
-        "request_path": request_path,
-        "service": service,
-    }
 
 
 def _scalar_matches(actual: object, expected: object) -> bool:
@@ -837,7 +741,6 @@ def normalize_setup_state(
             service,
             entity_id,
             access_token,
-            evidence_phase="setup",
             extra=extra,
         )
         calls.append({"domain": domain, "http": status, "service": service})
@@ -867,19 +770,19 @@ def normalize_setup_state(
         {"temperature": 21},
     )
 
-    api.wait_for_projection(
+    api.wait_for_setup_projection(
         ENTITY_IDS["light"],
         access_token,
         state="on",
         attributes={"brightness": 64, "color_temp_kelvin": 3000},
     )
-    api.wait_for_projection(
+    api.wait_for_setup_projection(
         ENTITY_IDS["cover"],
         access_token,
         state="open",
         attributes={"current_position": 10},
     )
-    api.wait_for_projection(
+    api.wait_for_setup_projection(
         ENTITY_IDS["climate"],
         access_token,
         state="cool",
@@ -890,48 +793,6 @@ def normalize_setup_state(
         "dispatches": calls,
         "included_in_sut_dispatch_count": False,
         "purpose": "setup_only",
-    }
-
-
-def mutate_target_state(
-    api: HomeAssistantApi,
-    access_token: str,
-    case: TargetDriftCase,
-) -> dict[str, object]:
-    """Apply and observe one explicit out-of-band state-drift injection."""
-
-    data = dict(case.mutation_service_data)
-    if data.pop("entity_id", None) != case.entity_id:
-        raise AcceptanceError("target-drift mutation entity does not match its case")
-    status = _service_call(
-        api,
-        case.domain,
-        case.mutation_service,
-        case.entity_id,
-        access_token,
-        evidence_phase="external_fault_injection",
-        extra=data,
-    )
-    expected = dict(case.expected_drifted_state)
-    state = expected.pop("state", None)
-    if not isinstance(state, str):
-        raise AcceptanceError("target-drift expected state is missing")
-    api.wait_for_projection(
-        case.entity_id,
-        access_token,
-        state=state,
-        attributes=expected,
-    )
-    return {
-        "classification": "out_of_band_fault_injection",
-        "data": dict(case.mutation_service_data),
-        "domain": case.domain,
-        "http_status": status,
-        "included_in_sut_dispatch_count": False,
-        "observed_path": f"/api/states/{case.entity_id}",
-        "request_path": f"/api/services/{case.domain}/{case.mutation_service}",
-        "service": case.mutation_service,
-        "transport": "home_assistant_rest_api",
     }
 
 
@@ -961,166 +822,8 @@ def _mapping(value: object, label: str) -> dict[str, object]:
     return dict(value)
 
 
-def _run_target_drift_case(
-    adapter: HomeAssistantRESTAdapter,
-    registry: EntityRegistry,
-    store: PreparedActionStore,
-    mutate_target: Callable[[TargetDriftCase], Mapping[str, object]],
-) -> dict[str, Any]:
-    """Prepare, mutate the real target out of band, and prove zero dispatch."""
-
-    case = TARGET_DRIFT_CASE
-    grounded = ground_domux_request(case.utterance, case.raw_output, registry)
-    if grounded.clarification.required:
-        raise AcceptanceError("target-drift case unexpectedly requires clarification")
-    resolved = resolve_unique_request(grounded, registry)
-    if resolved.chosen.entity_id != case.entity_id:
-        raise AcceptanceError("target-drift case resolved to an unexpected entity")
-
-    prepared = store.prepare(
-        actor_id="ha-acceptance-actor",
-        session_id="ha-acceptance-session",
-        grounded=grounded,
-        registry=registry,
-        adapter=adapter,
-    )
-    snapshot = store.snapshot(prepared.nonce)
-    plan = _mapping(snapshot.get("plan"), "target-drift prepared plan")
-    state_entity_ids = snapshot.get("state_entity_ids")
-    prepared_state_digest = snapshot.get("state_digest")
-    if (
-        state_entity_ids != [case.entity_id]
-        or not isinstance(prepared_state_digest, str)
-        or re.fullmatch(r"[0-9a-f]{64}", prepared_state_digest) is None
-    ):
-        raise AcceptanceError("target-drift prepared state binding is unexpected")
-    service_data = _mapping(
-        plan.get("service_data"),
-        "target-drift prepared service data",
-    )
-    if (
-        prepared.entity_id != case.entity_id
-        or plan.get("entity_id") != case.entity_id
-        or plan.get("domain") != case.domain
-        or plan.get("service") != case.expected_service
-        or service_data != dict(case.expected_service_data)
-    ):
-        raise AcceptanceError("target-drift prepared action has an unexpected shape")
-
-    before_binding = state_binding(
-        adapter,
-        registry,
-        state_entity_ids,
-        for_planning=True,
-    )
-    before_binding_digest = digest_json(before_binding)
-    if before_binding_digest != prepared_state_digest:
-        raise AcceptanceError(
-            "target-drift planning state changed before the explicit mutation"
-        )
-    bound_state = controlled_projection(adapter.get_state(case.entity_id), case.domain)
-    _assert_projection_subset(
-        bound_state,
-        case.expected_bound_state,
-        label="target-drift bound state",
-    )
-    dispatch_count_before_mutation = len(adapter.sut_calls)
-    mutation = dict(mutate_target(case))
-    if len(adapter.sut_calls) != dispatch_count_before_mutation:
-        raise AcceptanceError("out-of-band target mutation was counted as a SUT dispatch")
-    drifted_state = controlled_projection(
-        adapter.get_state(case.entity_id),
-        case.domain,
-    )
-    _assert_projection_subset(
-        drifted_state,
-        case.expected_drifted_state,
-        label="target-drift mutated state",
-    )
-    after_binding = state_binding(
-        adapter,
-        registry,
-        state_entity_ids,
-        for_planning=True,
-    )
-    after_binding_digest = digest_json(after_binding)
-    if after_binding_digest == prepared_state_digest:
-        raise AcceptanceError("target-drift mutation did not change the planning state")
-
-    dispatch_count_before_commit = len(adapter.sut_calls)
-    rejected = store.commit(
-        prepared.confirmation(),
-        registry=registry,
-        adapter=adapter,
-    )
-    dispatch_delta = len(adapter.sut_calls) - dispatch_count_before_commit
-    if (
-        rejected.accepted
-        or rejected.dispatched
-        or rejected.acknowledged
-        or rejected.outcome_unknown
-        or rejected.reason != "state_changed"
-        or rejected.status != "INVALIDATED"
-        or dispatch_delta != 0
-    ):
-        raise AcceptanceError("target drift was not rejected with zero SUT dispatch")
-
-    expected_mutation = {
-        "classification": "out_of_band_fault_injection",
-        "data": dict(case.mutation_service_data),
-        "domain": case.domain,
-        "http_status": 200,
-        "included_in_sut_dispatch_count": False,
-        "observed_path": f"/api/states/{case.entity_id}",
-        "request_path": f"/api/services/{case.domain}/{case.mutation_service}",
-        "service": case.mutation_service,
-        "transport": "home_assistant_rest_api",
-    }
-    if mutation != expected_mutation:
-        raise AcceptanceError("target-drift mutation evidence is unexpected")
-    return {
-        "binding": {
-            "after_external_mutation_state_digest": after_binding_digest,
-            "before_external_mutation_state_digest": before_binding_digest,
-            "changed_after_external_mutation": True,
-            "matched_before_external_mutation": True,
-            "prepared_state_digest": prepared_state_digest,
-        },
-        "case": case.name,
-        "controlled_after_external_mutation": drifted_state,
-        "controlled_before_external_mutation": bound_state,
-        "domain": case.domain,
-        "external_mutation": mutation,
-        "grounding": {
-            "candidate_ids": [
-                candidate.entity_id for candidate in grounded.candidates
-            ],
-            "clarification_required": grounded.clarification.required,
-            "resolution": "resolve_unique_request",
-            "selected_entity_id": resolved.chosen.entity_id,
-        },
-        "outcome": "REJECTED_BEFORE_DISPATCH",
-        "rejection": {
-            "acknowledged": rejected.acknowledged,
-            "accepted": rejected.accepted,
-            "dispatched": rejected.dispatched,
-            "outcome_unknown": rejected.outcome_unknown,
-            "reason": rejected.reason,
-            "status": rejected.status,
-            "sut_dispatch_delta": dispatch_delta,
-        },
-        "service_shape": {
-            "data": service_data,
-            "domain": case.domain,
-            "service": case.expected_service,
-        },
-    }
-
-
 def run_sut_cases(
     adapter: HomeAssistantRESTAdapter,
-    *,
-    mutate_target: Callable[[TargetDriftCase], Mapping[str, object]],
 ) -> dict[str, Any]:
     """Run grounding through one-time commit against the real REST adapter."""
 
@@ -1258,7 +961,6 @@ def run_sut_cases(
                     "resolution": resolution,
                     "selected_entity_id": resolved.chosen.entity_id,
                 },
-                "outcome": "COMMITTED",
                 "postcondition": {
                     "all_registered_entities_exact": True,
                     "matched_prepared_projection": True,
@@ -1279,19 +981,10 @@ def run_sut_cases(
             }
         )
 
-    reports.append(
-        _run_target_drift_case(
-            adapter,
-            registry,
-            store,
-            mutate_target,
-        )
-    )
     if len(adapter.sut_calls) != len(SUT_CASES):
-        raise AcceptanceError("SUT dispatch count differs from committed case count")
+        raise AcceptanceError("SUT dispatch count differs from the fixed case count")
     return {
         "adapter": "HomeAssistantRESTAdapter",
-        "case_count": len(reports),
         "cases": reports,
         "classification": "clarify_commit_sut",
         "pipeline": [
@@ -1301,9 +994,6 @@ def run_sut_cases(
             "PreparedActionStore.commit",
             "HomeAssistantRESTAdapter.call_service",
         ],
-        "external_fault_injection_count": 1,
-        "rejected_before_dispatch_count": 1,
-        "successful_transition_count": len(SUT_CASES),
         "sut_dispatch_total": len(adapter.sut_calls),
     }
 
@@ -1401,68 +1091,7 @@ def exercise_home_assistant(
     api.wait_for_entities(ENTITY_IDS.values(), access_token)
     setup = normalize_setup_state(api, access_token)
     adapter = rest_adapter_factory(api.base_url, access_token)
-    sut = run_sut_cases(
-        adapter,
-        mutate_target=lambda case: mutate_target_state(
-            api,
-            access_token,
-            case,
-        ),
-    )
-    expected_direct_calls = [
-        _direct_service_event("setup", "light", "turn_on", "/api/services/light/turn_on", 200),
-        _direct_service_event(
-            "setup",
-            "cover",
-            "set_cover_position",
-            "/api/services/cover/set_cover_position",
-            200,
-        ),
-        _direct_service_event(
-            "setup",
-            "climate",
-            "set_hvac_mode",
-            "/api/services/climate/set_hvac_mode",
-            200,
-        ),
-        _direct_service_event(
-            "setup",
-            "climate",
-            "set_temperature",
-            "/api/services/climate/set_temperature",
-            200,
-        ),
-        _direct_service_event(
-            "external_fault_injection",
-            "light",
-            "turn_on",
-            "/api/services/light/turn_on",
-            200,
-        ),
-    ]
-    if api.direct_service_calls != expected_direct_calls:
-        raise AcceptanceError("direct REST service-call ledger is unexpected")
-    setup_direct_count = sum(
-        event["phase"] == "setup" for event in api.direct_service_calls
-    )
-    external_count = sum(
-        event["phase"] == "external_fault_injection"
-        for event in api.direct_service_calls
-    )
-    sut_dispatch_count = len(adapter.sut_calls)
-    if (
-        setup_direct_count != len(setup["dispatches"])
-        or external_count != sut["external_fault_injection_count"]
-        or sut_dispatch_count != sut["sut_dispatch_total"]
-    ):
-        raise AcceptanceError("service-call phase accounting is inconsistent")
-    service_call_accounting = {
-        "direct_rest_events": [dict(event) for event in api.direct_service_calls],
-        "external_fault_injection": external_count,
-        "setup_direct_rest": setup_direct_count,
-        "sut_dispatches": sut_dispatch_count,
-        "total": len(api.direct_service_calls) + sut_dispatch_count,
-    }
+    sut = run_sut_cases(adapter)
 
     revoked = api.request(
         "POST", "/auth/revoke", form_body={"token": refresh_token}
@@ -1506,7 +1135,6 @@ def exercise_home_assistant(
             "http": readiness.status,
         },
         "phases": {
-            "service_call_accounting": service_call_accounting,
             "setup": setup,
             "sut": sut,
             "teardown": {
@@ -1562,7 +1190,7 @@ def execute_acceptance(
                 "random_loopback_binding": True,
                 "restart_policy": "no",
             },
-            "schema_version": 2,
+            "schema_version": 1,
             "status": "passed",
         }
     finally:

@@ -38,6 +38,9 @@ PINNED_V2_MANIFEST_SHA256 = (
     "53feda5739aacea28f709e7882f6ca35cdc7c285acddc64de57c78ff54559c08"
 )
 PINNED_HA_ACCEPTANCE_SHA256 = (
+    "4af8c185ff14e8c6d89f4b942ead7bd1f06685c83a8648d0e1d4fed3ad9e7cc3"
+)
+PINNED_V3_HA_ACCEPTANCE_SHA256 = (
     "fc3132b74978e3bb73954a681800cc13b398dd57267a0be953c83fd23e40d1e7"
 )
 PINNED_V3_POLICY_PLAN_SHA256 = (
@@ -101,7 +104,9 @@ V2_CODE_FREEZE_FILES = (
 )
 V2_ARCHIVED_SOURCE_FILES = (
     "clarify_commit.py",
+    "ha_acceptance.py",
     "tests/test_clarify_commit.py",
+    "tests/test_ha_acceptance.py",
 )
 REPLAY_OUTPUT_NAMES = ("trials.jsonl", "report.json", "manifest.json")
 HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -816,7 +821,7 @@ def _verify_ha(case_dir: Path) -> dict[str, object]:
         evidence_path, PINNED_HA_ACCEPTANCE_SHA256, "Home Assistant acceptance"
     )
     evidence = _load_json(payload, "Home Assistant acceptance")
-    _require(evidence.get("schema_version") == 1 and evidence.get("status") == "passed", "HA acceptance did not pass")
+    _require(evidence.get("schema_version") == 2 and evidence.get("status") == "passed", "HA acceptance did not pass")
     image = _mapping(evidence.get("image"), "HA image")
     _require(image.get("repository") == "ghcr.io/home-assistant/home-assistant", "HA image repository changed")
     _require(image.get("version") == "2026.8.3", "HA image version changed")
@@ -841,63 +846,261 @@ def _verify_ha(case_dir: Path) -> dict[str, object]:
     phases = _mapping(home_assistant.get("phases"), "HA phases")
     setup = _mapping(phases.get("setup"), "HA setup")
     _require(setup.get("included_in_sut_dispatch_count") is False, "HA setup calls entered SUT count")
+    setup_dispatches = _sequence(setup.get("dispatches"), "HA setup dispatches")
+    expected_setup = (
+        ("light", "turn_on"),
+        ("cover", "set_cover_position"),
+        ("climate", "set_hvac_mode"),
+        ("climate", "set_temperature"),
+    )
+    _require(len(setup_dispatches) == len(expected_setup), "HA setup dispatch count changed")
+    for raw_dispatch, (domain, service) in zip(setup_dispatches, expected_setup, strict=True):
+        dispatch = _mapping(raw_dispatch, "HA setup dispatch")
+        _require(
+            dispatch == {"domain": domain, "http": 200, "service": service},
+            "HA setup dispatch shape changed",
+        )
     sut = _mapping(phases.get("sut"), "HA SUT")
     _require(sut.get("classification") == "clarify_commit_sut", "HA SUT classification changed")
     cases = _sequence(sut.get("cases"), "HA SUT cases")
     expected_cases = {
-        "clarified_light_brightness": ("light", "turn_on"),
-        "unique_cover_position": ("cover", "set_cover_position"),
-        "unique_climate_temperature": ("climate", "set_temperature"),
+        "clarified_light_brightness": {
+            "after": {"brightness": 128, "state": "on"},
+            "before": {"brightness": 64, "state": "on"},
+            "candidates": ["light.bed_light", "light.ceiling_lights"],
+            "clarification_required": True,
+            "data": {"brightness_pct": 50, "entity_id": "light.bed_light"},
+            "domain": "light",
+            "entity_id": "light.bed_light",
+            "resolution": "resolve_clarification_submission",
+            "service": "turn_on",
+        },
+        "unique_cover_position": {
+            "after": {"current_position": 20, "state": "open"},
+            "before": {"current_position": 10, "state": "open"},
+            "candidates": ["cover.hall_window"],
+            "clarification_required": False,
+            "data": {"entity_id": "cover.hall_window", "position": 20},
+            "domain": "cover",
+            "entity_id": "cover.hall_window",
+            "resolution": "resolve_unique_request",
+            "service": "set_cover_position",
+        },
+        "unique_climate_temperature": {
+            "after": {"state": "cool", "temperature": 23},
+            "before": {"state": "cool", "temperature": 21},
+            "candidates": ["climate.hvac"],
+            "clarification_required": False,
+            "data": {"entity_id": "climate.hvac", "temperature": 23},
+            "domain": "climate",
+            "entity_id": "climate.hvac",
+            "resolution": "resolve_unique_request",
+            "service": "set_temperature",
+        },
     }
-    _require(len(cases) == sut.get("sut_dispatch_total") == 3, "HA SUT dispatch count mismatch")
-    observed_names: set[str] = set()
+    _require(
+        len(cases) == sut.get("case_count") == 4,
+        "HA acceptance case count mismatch",
+    )
+    _require(
+        sut.get("successful_transition_count") == 3
+        and sut.get("rejected_before_dispatch_count") == 1
+        and sut.get("external_fault_injection_count") == 1
+        and sut.get("sut_dispatch_total") == 3,
+        "HA SUT outcome accounting mismatch",
+    )
+    committed: dict[str, Mapping[str, object]] = {}
+    drift: Mapping[str, object] | None = None
     for raw_case in cases:
         case = _mapping(raw_case, "HA SUT case")
         name = case.get("case")
-        _require(isinstance(name, str) and name in expected_cases, f"unknown HA SUT case: {name}")
-        _require(name not in observed_names, f"duplicate HA SUT case: {name}")
-        observed_names.add(name)
+        _require(isinstance(name, str), "HA case name is invalid")
+        if name == "target_state_drift_rejected":
+            _require(drift is None, "duplicate HA target-drift case")
+            drift = case
+            continue
+        _require(name in expected_cases, f"unknown HA SUT case: {name}")
+        _require(name not in committed, f"duplicate HA SUT case: {name}")
+        committed[name] = case
+        expected = expected_cases[name]
+        _require(case.get("outcome") == "COMMITTED", f"HA outcome changed: {name}")
+        _require(case.get("domain") == expected["domain"], f"HA domain changed: {name}")
         grounding = _mapping(case.get("grounding"), f"HA grounding {name}")
         candidates = _sequence(grounding.get("candidate_ids"), f"HA candidates {name}")
-        _require(grounding.get("selected_entity_id") in candidates, f"HA selected target not in candidates: {name}")
+        _require(
+            list(candidates) == expected["candidates"]
+            and grounding.get("selected_entity_id") == expected["entity_id"]
+            and grounding.get("selected_entity_id") in candidates
+            and grounding.get("clarification_required") is expected["clarification_required"]
+            and grounding.get("resolution") == expected["resolution"],
+            f"HA grounding changed: {name}",
+        )
         postcondition = _mapping(case.get("postcondition"), f"HA postcondition {name}")
-        _require(postcondition.get("status") == "COMMITTED", f"HA case was not committed: {name}")
-        _require(postcondition.get("reason") == "committed", f"HA commit reason changed: {name}")
-        _require(postcondition.get("matched_prepared_projection") is True, f"HA projection mismatch: {name}")
-        _require(postcondition.get("all_registered_entities_exact") is True, f"HA exact-state check failed: {name}")
+        _require(
+            postcondition == {
+                "all_registered_entities_exact": True,
+                "matched_prepared_projection": True,
+                "reason": "committed",
+                "status": "COMMITTED",
+            },
+            f"HA postcondition changed: {name}",
+        )
         replay = _mapping(case.get("replay"), f"HA replay {name}")
-        _require(replay.get("accepted") is False and replay.get("dispatched") is False, f"HA replay was accepted: {name}")
-        _require(replay.get("reason") == "replayed_nonce" and replay.get("sut_dispatch_delta") == 0, f"HA replay guard failed: {name}")
+        _require(
+            replay == {
+                "accepted": False,
+                "dispatched": False,
+                "reason": "replayed_nonce",
+                "sut_dispatch_delta": 0,
+            },
+            f"HA replay guard failed: {name}",
+        )
         shape = _mapping(case.get("service_shape"), f"HA service {name}")
-        expected_domain, expected_service = expected_cases[name]
-        _require(shape.get("domain") == expected_domain and shape.get("service") == expected_service, f"HA service shape mismatch: {name}")
-    _require(observed_names == set(expected_cases), "HA SUT case set changed")
+        _require(
+            shape == {
+                "data": expected["data"],
+                "domain": expected["domain"],
+                "service": expected["service"],
+            },
+            f"HA service shape mismatch: {name}",
+        )
+        for state_name, expected_projection in (
+            ("controlled_before", expected["before"]),
+            ("controlled_after", expected["after"]),
+        ):
+            projection = _mapping(case.get(state_name), f"HA {state_name} {name}")
+            _require(
+                projection.get("entity_id") == expected["entity_id"]
+                and all(projection.get(key) == value for key, value in expected_projection.items()),
+                f"HA {state_name} changed: {name}",
+            )
+    _require(set(committed) == set(expected_cases), "HA committed case set changed")
+    _require(drift is not None, "HA target-drift case is missing")
+    drift_grounding = _mapping(drift.get("grounding"), "HA drift grounding")
+    _require(
+        drift.get("domain") == "light"
+        and drift.get("outcome") == "REJECTED_BEFORE_DISPATCH"
+        and drift_grounding == {
+            "candidate_ids": ["light.bed_light"],
+            "clarification_required": False,
+            "resolution": "resolve_unique_request",
+            "selected_entity_id": "light.bed_light",
+        },
+        "HA target-drift grounding changed",
+    )
+    drift_shape = _mapping(drift.get("service_shape"), "HA drift service")
+    _require(
+        drift_shape == {
+            "data": {"brightness_pct": 75, "entity_id": "light.bed_light"},
+            "domain": "light",
+            "service": "turn_on",
+        },
+        "HA target-drift prepared service changed",
+    )
+    mutation = _mapping(drift.get("external_mutation"), "HA drift mutation")
+    _require(
+        mutation == {
+            "classification": "out_of_band_fault_injection",
+            "data": {"brightness_pct": 25, "entity_id": "light.bed_light"},
+            "domain": "light",
+            "http_status": 200,
+            "included_in_sut_dispatch_count": False,
+            "observed_path": "/api/states/light.bed_light",
+            "request_path": "/api/services/light/turn_on",
+            "service": "turn_on",
+            "transport": "home_assistant_rest_api",
+        },
+        "HA target-drift mutation evidence changed",
+    )
+    before_drift = _mapping(
+        drift.get("controlled_before_external_mutation"),
+        "HA state before drift",
+    )
+    after_drift = _mapping(
+        drift.get("controlled_after_external_mutation"),
+        "HA state after drift",
+    )
+    _require(
+        before_drift == committed["clarified_light_brightness"].get("controlled_after")
+        and before_drift.get("entity_id") == after_drift.get("entity_id") == "light.bed_light"
+        and before_drift.get("state") == after_drift.get("state") == "on"
+        and before_drift.get("brightness") == 128
+        and after_drift.get("brightness") == 64
+        and before_drift != after_drift,
+        "HA target-drift state chain changed",
+    )
+    binding = _mapping(drift.get("binding"), "HA drift binding")
+    prepared_digest = _require_digest(binding.get("prepared_state_digest"), "HA prepared state")
+    before_digest = _require_digest(
+        binding.get("before_external_mutation_state_digest"),
+        "HA before-mutation state",
+    )
+    after_digest = _require_digest(
+        binding.get("after_external_mutation_state_digest"),
+        "HA after-mutation state",
+    )
+    _require(
+        binding.get("matched_before_external_mutation") is True
+        and binding.get("changed_after_external_mutation") is True
+        and prepared_digest == before_digest
+        and after_digest != prepared_digest,
+        "HA target-drift state binding changed",
+    )
+    rejection = _mapping(drift.get("rejection"), "HA drift rejection")
+    _require(
+        rejection == {
+            "acknowledged": False,
+            "accepted": False,
+            "dispatched": False,
+            "outcome_unknown": False,
+            "reason": "state_changed",
+            "status": "INVALIDATED",
+            "sut_dispatch_delta": 0,
+        },
+        "HA target-drift rejection changed",
+    )
+    accounting = _mapping(
+        phases.get("service_call_accounting"),
+        "HA service-call accounting",
+    )
+    expected_direct_events = [
+        {
+            "domain": domain,
+            "http_status": 200,
+            "phase": phase,
+            "request_path": f"/api/services/{domain}/{service}",
+            "service": service,
+        }
+        for phase, domain, service in (
+            ("setup", "light", "turn_on"),
+            ("setup", "cover", "set_cover_position"),
+            ("setup", "climate", "set_hvac_mode"),
+            ("setup", "climate", "set_temperature"),
+            ("external_fault_injection", "light", "turn_on"),
+        )
+    ]
+    _require(
+        accounting == {
+            "direct_rest_events": expected_direct_events,
+            "external_fault_injection": 1,
+            "setup_direct_rest": 4,
+            "sut_dispatches": 3,
+            "total": 8,
+        },
+        "HA service-call accounting changed",
+    )
     teardown = _mapping(phases.get("teardown"), "HA teardown")
     _require(teardown.get("refresh_revoke_http") == 200, "HA teardown revoke failed")
     _require(teardown.get("refresh_after_revoke_http") == 400, "HA teardown credential remained usable")
-
-    code_freeze = _load_json(
-        _read_pinned(
-            case_dir / "evidence" / "v2" / "code_freeze.json",
-            PINNED_V2_CODE_FREEZE_SHA256,
-            "v2 code freeze",
-        ),
-        "v2 code freeze",
-    )
-    ha_binding = _mapping(
-        _mapping(code_freeze.get("files"), "v2 code-freeze files").get("ha_acceptance.py"),
-        "HA source binding",
-    )
-    _verify_binding(
-        _read_bytes(case_dir / "ha_acceptance.py", "HA acceptance source"),
-        ha_binding,
-        "HA acceptance source",
-    )
     return {
         "status": "verified",
         "artifact_sha256": PINNED_HA_ACCEPTANCE_SHA256,
         "image_version": image["version"],
+        "drift_sut_dispatch_delta": rejection["sut_dispatch_delta"],
+        "rejected_before_dispatch": 1,
+        "successful_transitions": 3,
         "sut_cases": len(cases),
+        "sut_dispatch_total": 3,
     }
 
 
@@ -914,6 +1117,11 @@ def _verify_v3(case_dir: Path) -> dict[str, object]:
         v3_dir / "validation.json",
         PINNED_V3_VALIDATION_SHA256,
         "v3 validation",
+    )
+    _read_pinned(
+        v3_dir / "ha_acceptance.json",
+        PINNED_V3_HA_ACCEPTANCE_SHA256,
+        "archived v3 Home Assistant acceptance",
     )
     plan = _load_json(plan_payload, "v3 policy plan")
     validation = _load_json(validation_payload, "v3 validation")
@@ -1011,7 +1219,7 @@ def _verify_v3(case_dir: Path) -> dict[str, object]:
     )
     _require(
         immutable.get("home_assistant_acceptance_sha256")
-        == PINNED_HA_ACCEPTANCE_SHA256,
+        == PINNED_V3_HA_ACCEPTANCE_SHA256,
         "v3/HA binding changed",
     )
 
@@ -1020,8 +1228,8 @@ def _verify_v3(case_dir: Path) -> dict[str, object]:
         "v3 source bindings",
     )
     expected_sources = {
-        "clarify_commit.py": case_dir / "clarify_commit.py",
-        "tests/test_clarify_commit.py": case_dir / "tests" / "test_clarify_commit.py",
+        "clarify_commit.py": v3_dir / "code" / "clarify_commit.py",
+        "tests/test_clarify_commit.py": v3_dir / "code" / "tests" / "test_clarify_commit.py",
         "evidence/v3/policy_plan.json": v3_dir / "policy_plan.json",
     }
     _require(
