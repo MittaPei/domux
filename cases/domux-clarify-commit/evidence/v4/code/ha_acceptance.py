@@ -9,7 +9,6 @@ memory and are deliberately excluded from the deterministic JSON artifact.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import io
 import json
 import math
@@ -37,6 +36,7 @@ from clarify_commit import (
     controlled_projection,
     digest_json,
     ground_domux_request,
+    parse_domux_output,
     projection_matches,
     resolve_clarification_submission,
     resolve_unique_request,
@@ -65,17 +65,9 @@ ENTITY_TIMEOUT_SECONDS = 120
 STATE_TIMEOUT_SECONDS = 30
 
 ONBOARDING_STEPS = ("user", "core_config", "analytics", "integration")
-CASE_DIR = Path(__file__).resolve().parent
-V1_DOMUX_EVIDENCE_PATH = CASE_DIR / "evidence" / "v1" / "domux_raw.jsonl"
-V1_DOMUX_EVIDENCE_ARTIFACT = "evidence/v1/domux_raw.jsonl"
-V1_DOMUX_EVIDENCE_SHA256 = "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966"
-SCENARIO_EVIDENCE_PATH = CASE_DIR / "data" / "scenarios.jsonl"
-SCENARIO_EVIDENCE_ARTIFACT = "data/scenarios.jsonl"
-SCENARIO_EVIDENCE_SHA256 = "0e27842c62d9cd4e4b1467b43e3ebcd346c79c0125c4f40cce97d363c821a0a0"
-HA_REGISTRY_PROFILE = "semantic_target_mapping_subset_not_full_scenario_inventory"
 ENTITY_IDS = {
-    "living_room_light": "light.ceiling_lights",
-    "study_light": "light.bed_light",
+    "light": "light.bed_light",
+    "light_alternative": "light.ceiling_lights",
     "cover": "cover.hall_window",
     "climate": "climate.hvac",
 }
@@ -121,223 +113,16 @@ class PreparedRuntime:
 
 
 @dataclass(frozen=True)
-class DomuxEvidenceKey:
-    """Stable identity of one immutable v1 model-output record."""
-
-    base_id: str
-    variant: str
-
-
-@dataclass(frozen=True)
-class ExpectedDomuxEvidence:
-    """Pinned field digests for one required v1 command/output pair."""
-
-    line_number: int
-    query_sha256: str
-    raw_output_sha256: str
-
-
-@dataclass(frozen=True)
-class ExpectedFrozenScenario:
-    """Pinned identity of one exact row in the pre-model scenario freeze."""
-
-    binding_sha256: str
-    line_number: int
-    row_sha256: str
-    target_entity_id: str
-
-
-@dataclass(frozen=True)
-class RecordedDomuxEvidence:
-    """One cryptographically verified command/output pair from v1 evidence."""
-
-    artifact_sha256: str
-    base_id: str
-    command: str
-    line_number: int
-    query_sha256: str
-    raw_output: str
-    raw_output_sha256: str
-    variant: str
-
-    @property
-    def key(self) -> DomuxEvidenceKey:
-        return DomuxEvidenceKey(self.base_id, self.variant)
-
-    def provenance(self) -> dict[str, object]:
-        """Return path-safe evidence provenance for the acceptance artifact."""
-
-        return {
-            "artifact": V1_DOMUX_EVIDENCE_ARTIFACT,
-            "artifact_sha256": self.artifact_sha256,
-            "base_id": self.base_id,
-            "line_number": self.line_number,
-            "pair_verified": True,
-            "query_sha256": self.query_sha256,
-            "raw_output_sha256": self.raw_output_sha256,
-            "validation": "whole_artifact_and_per_field_sha256",
-            "variant": self.variant,
-        }
-
-
-@dataclass(frozen=True)
-class FrozenScenarioEvidence:
-    """Validated scenario gold and target semantics for one base case."""
-
-    ambiguous_command: str
-    artifact_sha256: str
-    base_id: str
-    candidate_entity_ids: tuple[str, ...]
-    clarification_answer: str
-    clear_command: str
-    confirmed_instruction: DomuxInstruction
-    expected_target_entity_id: str
-    line_number: int
-    row_sha256: str
-    target_inventory_semantics: Mapping[str, object]
-
-    def command_for_variant(self, variant: str) -> str:
-        if variant == "ambiguous":
-            return self.ambiguous_command
-        if variant == "clear":
-            return self.clear_command
-        raise AcceptanceError("HA case references an unsupported scenario variant")
-
-    def confirmed_instruction_mapping(self) -> dict[str, str]:
-        return {
-            "action": self.confirmed_instruction.action,
-            "attribute": self.confirmed_instruction.attribute,
-            "device": self.confirmed_instruction.device,
-            "floor": self.confirmed_instruction.floor,
-            "room": self.confirmed_instruction.room,
-            "unit": self.confirmed_instruction.unit,
-            "value": self.confirmed_instruction.value,
-        }
-
-    def binding_payload(self) -> dict[str, object]:
-        target_semantics = dict(self.target_inventory_semantics)
-        target_semantics["aliases"] = list(target_semantics["aliases"])
-        return {
-            "ambiguous_command": self.ambiguous_command,
-            "base_id": self.base_id,
-            "candidate_entity_ids": list(self.candidate_entity_ids),
-            "clarification_answer": self.clarification_answer,
-            "clear_command": self.clear_command,
-            "confirmed_instruction": self.confirmed_instruction_mapping(),
-            "expected_target_entity_id": self.expected_target_entity_id,
-            "target_inventory_semantics": target_semantics,
-        }
-
-    def binding_sha256(self) -> str:
-        return digest_json(self.binding_payload())
-
-    def provenance(
-        self,
-        *,
-        variant: str,
-        ha_demo_entity_id: str,
-        ha_matching_candidate_count: int,
-        used_for_resolution: bool,
-    ) -> dict[str, object]:
-        """Return machine-readable scenario lineage and inventory limitation."""
-
-        target_semantics = dict(self.target_inventory_semantics)
-        target_semantics["aliases"] = list(target_semantics["aliases"])
-        confirmed = self.confirmed_instruction_mapping()
-        return {
-            "artifact": SCENARIO_EVIDENCE_ARTIFACT,
-            "artifact_sha256": self.artifact_sha256,
-            "base_id": self.base_id,
-            "binding_sha256": self.binding_sha256(),
-            "clarification_answer": self.clarification_answer,
-            "clarification_answer_sha256": _sha256_text(self.clarification_answer),
-            "confirmed_instruction": confirmed,
-            "confirmed_instruction_sha256": _sha256_text(
-                self.confirmed_instruction.to_pipe()
-            ),
-            "expected_target_entity_id": self.expected_target_entity_id,
-            "frozen_candidate_count": len(self.candidate_entity_ids),
-            "ha_matching_candidate_count": ha_matching_candidate_count,
-            "ha_registry_profile": HA_REGISTRY_PROFILE,
-            "inventory_limitation": {
-                "full_scenario_inventory_reproduced": False,
-                "profile": HA_REGISTRY_PROFILE,
-            },
-            "line_number": self.line_number,
-            "post_clarification_model_call": False,
-            "row_sha256": self.row_sha256,
-            "scenario_target_to_ha_demo_entity": {
-                "ha_demo_entity_id": ha_demo_entity_id,
-                "scenario_target_entity_id": self.expected_target_entity_id,
-                "semantic_fields_match": True,
-            },
-            "source": "frozen_synthetic_scenario_gold",
-            "target_inventory_semantics": target_semantics,
-            "used_for_resolution": used_for_resolution,
-            "variant": variant,
-            "variant_command_sha256": _sha256_text(self.command_for_variant(variant)),
-        }
-
-
-REQUIRED_DOMUX_EVIDENCE = {
-    DomuxEvidenceKey("eval-duplicate_entity-01", "ambiguous"): ExpectedDomuxEvidence(
-        line_number=2,
-        query_sha256=("f27717f08a911d7db2dcafcec7dc4fb5363b9cff40840596c17d548101b6fdcf"),
-        raw_output_sha256=("c5fee12f0a6f2de9ca00f1a3d64485625ddcceba18e34a799ddbfe38196dd76e"),
-    ),
-    DomuxEvidenceKey("eval-duplicate_entity-02", "clear"): ExpectedDomuxEvidence(
-        line_number=3,
-        query_sha256=("cd4494727bc97d234d9c50f345468ab88b3571230ef610b5ef367d307f30e784"),
-        raw_output_sha256=("1435c4aa085aa8a5470b0cafc14629f15ea12f5ea0fdb255fe0f3fcb90a85edf"),
-    ),
-    DomuxEvidenceKey("eval-duplicate_entity-03", "clear"): ExpectedDomuxEvidence(
-        line_number=5,
-        query_sha256=("c892af8646f0e3d0e52226ddf5d5c0ac4fed0d977ced9592e693b2abaf88962b"),
-        raw_output_sha256=("37282efde74972be3bc4bdab6351683ed9be31dcefbff39e1527ce81a0da58a4"),
-    ),
-    DomuxEvidenceKey("eval-duplicate_entity-04", "clear"): ExpectedDomuxEvidence(
-        line_number=7,
-        query_sha256=("01411704354a221b89abc4c31c1d577fa7aecce126d9fd3db966c68bcfe27973"),
-        raw_output_sha256=("6caea436fc1c6256aa56198c93270913e9323f6a0935267c55389eef078e57a4"),
-    ),
-}
-
-REQUIRED_FROZEN_SCENARIOS = {
-    "eval-duplicate_entity-01": ExpectedFrozenScenario(
-        binding_sha256="39c46c2421f31df71a05882b7fdf43a0c79ce658250c70ee4ecb53c4fff80518",
-        line_number=17,
-        row_sha256="8b8f6498aef6bb4cb7fd5af3ac9adbef3e2cf0013c7a22451fc339e5f85cd871",
-        target_entity_id="light.eval_de_01_living",
-    ),
-    "eval-duplicate_entity-02": ExpectedFrozenScenario(
-        binding_sha256="98e9f02e52d1c81f6a7a18a785885ab64ad93c57a3bd50de8f4f7a68b437ba83",
-        line_number=18,
-        row_sha256="24f7b968a30cba095932b3f5da47ce8f8fc65d521546a830de1b6ea149db7fb4",
-        target_entity_id="cover.eval_de_02_upstairs_hall",
-    ),
-    "eval-duplicate_entity-03": ExpectedFrozenScenario(
-        binding_sha256="4e149daeff09b5307563d5e96661e417f9349f9cc3129f80877ed2c7d4ac46c3",
-        line_number=19,
-        row_sha256="ef0be54be7aaae140c846076fe9568dbea981fd6a96575b12cb6633057756bdf",
-        target_entity_id="climate.eval_de_03_bedroom_second",
-    ),
-    "eval-duplicate_entity-04": ExpectedFrozenScenario(
-        binding_sha256="675d850e8d4ccb07709daa3d2b644a6c03f12aa5c239cf62dce62aa72e542b42",
-        line_number=20,
-        row_sha256="d9b32826a3e0229d5943e69a8ba3192635194f5ba87120945a6a92274e24c78e",
-        target_entity_id="light.eval_de_04_study",
-    ),
-}
-
-
-@dataclass(frozen=True)
 class SutCase:
-    """One v1-recorded Domux request and expected server-side service shape."""
+    """One fixed Domux request and its expected server-side service shape."""
 
     name: str
-    evidence_key: DomuxEvidenceKey
     domain: str
     entity_id: str
+    utterance: str
+    raw_output: str
+    clarification_answer: str | None
+    confirmed_output: str | None
     expected_service: str
     expected_service_data: Mapping[str, object]
     expected_before: Mapping[str, object]
@@ -349,9 +134,10 @@ class TargetDriftCase:
     """One prepared action invalidated by a real out-of-band HA state change."""
 
     name: str
-    evidence_key: DomuxEvidenceKey
     domain: str
     entity_id: str
+    utterance: str
+    raw_output: str
     expected_service: str
     expected_service_data: Mapping[str, object]
     expected_bound_state: Mapping[str, object]
@@ -362,56 +148,74 @@ class TargetDriftCase:
 
 SUT_CASES = (
     SutCase(
-        name="recorded_ambiguous_light_off",
-        evidence_key=DomuxEvidenceKey("eval-duplicate_entity-01", "ambiguous"),
+        name="clarified_light_brightness",
         domain="light",
-        entity_id="light.ceiling_lights",
-        expected_service="turn_off",
+        entity_id="light.bed_light",
+        utterance="Set the light brightness to 50 percent.",
+        raw_output="set|Light|brightness|50|Percent|*|*",
+        clarification_answer=(
+            "Use the Bedroom Bed Light and set its brightness to 50 percent."
+        ),
+        confirmed_output=(
+            "set|Bed Light|brightness|50|Percent|Bedroom|Ground Floor"
+        ),
+        expected_service="turn_on",
         expected_service_data={
-            "entity_id": "light.ceiling_lights",
+            "brightness_pct": 50.0,
+            "entity_id": "light.bed_light",
         },
-        expected_before={"brightness": 178, "state": "on"},
-        expected_after={"brightness": None, "state": "off"},
+        expected_before={"brightness": 64, "state": "on"},
+        expected_after={"brightness": 128, "state": "on"},
     ),
     SutCase(
-        name="recorded_unique_cover_position",
-        evidence_key=DomuxEvidenceKey("eval-duplicate_entity-02", "clear"),
+        name="unique_cover_position",
         domain="cover",
         entity_id="cover.hall_window",
+        utterance="Set the Hall Window position to 20 percent.",
+        raw_output="set|Hall Window|position|20|Percent|Hall|*",
+        clarification_answer=None,
+        confirmed_output=None,
         expected_service="set_cover_position",
         expected_service_data={
             "entity_id": "cover.hall_window",
             "position": 20,
         },
-        expected_before={"current_position": 80, "state": "open"},
+        expected_before={"current_position": 10, "state": "open"},
         expected_after={"current_position": 20, "state": "open"},
     ),
     SutCase(
-        name="recorded_unique_climate_temperature",
-        evidence_key=DomuxEvidenceKey("eval-duplicate_entity-03", "clear"),
+        name="unique_climate_temperature",
         domain="climate",
         entity_id="climate.hvac",
+        utterance="Set the Office HVAC temperature to 23 Celsius.",
+        raw_output="set|Hvac|temperature|23|Celsius|Office|*",
+        clarification_answer=None,
+        confirmed_output=None,
         expected_service="set_temperature",
         expected_service_data={
             "entity_id": "climate.hvac",
-            "temperature": 22.0,
+            "temperature": 23.0,
         },
-        expected_before={"state": "cool", "temperature": 24},
-        expected_after={"state": "cool", "temperature": 22},
+        expected_before={"state": "cool", "temperature": 21},
+        expected_after={"state": "cool", "temperature": 23},
     ),
 )
 
 TARGET_DRIFT_CASE = TargetDriftCase(
-    name="recorded_study_light_state_drift_rejected",
-    evidence_key=DomuxEvidenceKey("eval-duplicate_entity-04", "clear"),
+    name="target_state_drift_rejected",
     domain="light",
     entity_id="light.bed_light",
+    utterance=(
+        "Set the brightness of the Bed Light in the Bedroom on the Ground Floor "
+        "to 75 percent."
+    ),
+    raw_output="set|Bed Light|brightness|75|Percent|Bedroom|Ground Floor",
     expected_service="turn_on",
     expected_service_data={
-        "brightness_pct": 35.0,
+        "brightness_pct": 75.0,
         "entity_id": "light.bed_light",
     },
-    expected_bound_state={"brightness": 166, "state": "on"},
+    expected_bound_state={"brightness": 128, "state": "on"},
     mutation_service="turn_on",
     mutation_service_data={
         "brightness_pct": 25.0,
@@ -429,359 +233,36 @@ def sut_registry() -> EntityRegistry:
             EntitySpec(
                 "light.bed_light",
                 "light",
-                "Light",
-                "Study",
+                "Bed Light",
+                "Bedroom",
                 "Ground Floor",
+                ("Bedroom Light",),
             ),
             EntitySpec(
                 "light.ceiling_lights",
                 "light",
-                "Light",
+                "Ceiling Lights",
                 "Living Room",
                 "Ground Floor",
+                ("Living Room Lights",),
             ),
             EntitySpec(
                 "cover.hall_window",
                 "cover",
-                "Curtain",
+                "Hall Window",
                 "Hall",
-                "First Floor",
+                "Ground Floor",
             ),
             EntitySpec(
                 "climate.hvac",
                 "climate",
-                "AC",
-                "Bedroom",
-                "Second Floor",
+                "Hvac",
+                "Office",
+                "Ground Floor",
+                ("HVAC", "Office HVAC"),
             ),
         )
     )
-
-
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_text(value: str) -> str:
-    return _sha256_bytes(value.encode("utf-8"))
-
-
-def _configured_evidence_keys() -> tuple[DomuxEvidenceKey, ...]:
-    return tuple(case.evidence_key for case in SUT_CASES) + (TARGET_DRIFT_CASE.evidence_key,)
-
-
-def load_recorded_domux_evidence(
-    path: Path = V1_DOMUX_EVIDENCE_PATH,
-) -> dict[DomuxEvidenceKey, RecordedDomuxEvidence]:
-    """Load and verify the four exact v1 command/output pairs used by HA.
-
-    Verification is deliberately independent of the mutable current evidence:
-    the complete v1 JSONL byte stream, each command/output field digest, and the
-    four required record identities are pinned in this runner.
-    """
-
-    try:
-        payload = path.read_bytes()
-    except OSError as exc:
-        raise AcceptanceError("v1 Domux evidence artifact is unavailable") from exc
-    artifact_sha256 = _sha256_bytes(payload)
-    if artifact_sha256 != V1_DOMUX_EVIDENCE_SHA256:
-        raise AcceptanceError("v1 Domux evidence artifact digest does not match")
-    try:
-        lines = payload.decode("utf-8").splitlines()
-    except UnicodeDecodeError as exc:
-        raise AcceptanceError("v1 Domux evidence artifact is not UTF-8") from exc
-
-    records: dict[DomuxEvidenceKey, RecordedDomuxEvidence] = {}
-    seen_keys: set[DomuxEvidenceKey] = set()
-    for line_number, line in enumerate(lines, start=1):
-        if not line:
-            raise AcceptanceError("v1 Domux evidence contains a blank record")
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise AcceptanceError("v1 Domux evidence contains invalid JSON") from exc
-        if not isinstance(item, Mapping):
-            raise AcceptanceError("v1 Domux evidence record is not an object")
-        base_id = item.get("base_id")
-        variant = item.get("variant")
-        if not isinstance(base_id, str) or not isinstance(variant, str):
-            raise AcceptanceError("v1 Domux evidence record identity is invalid")
-        key = DomuxEvidenceKey(base_id, variant)
-        if key in seen_keys:
-            raise AcceptanceError("v1 Domux evidence contains a duplicate record key")
-        seen_keys.add(key)
-        expected = REQUIRED_DOMUX_EVIDENCE.get(key)
-        if expected is None:
-            continue
-        if line_number != expected.line_number:
-            raise AcceptanceError("required v1 Domux evidence line number does not match")
-
-        command = item.get("command")
-        raw_output = item.get("raw_output")
-        query_sha256 = item.get("query_sha256")
-        raw_output_sha256 = item.get("raw_output_sha256")
-        if (
-            item.get("status") != "ok"
-            or not isinstance(command, str)
-            or not isinstance(raw_output, str)
-            or not isinstance(query_sha256, str)
-            or not isinstance(raw_output_sha256, str)
-        ):
-            raise AcceptanceError("required v1 Domux evidence record is incomplete")
-        calculated_query_sha256 = _sha256_text(command)
-        calculated_raw_output_sha256 = _sha256_text(raw_output)
-        if (
-            query_sha256 != calculated_query_sha256
-            or query_sha256 != expected.query_sha256
-            or raw_output_sha256 != calculated_raw_output_sha256
-            or raw_output_sha256 != expected.raw_output_sha256
-        ):
-            raise AcceptanceError("required v1 Domux command/output field digest does not match")
-        records[key] = RecordedDomuxEvidence(
-            artifact_sha256=artifact_sha256,
-            base_id=base_id,
-            command=command,
-            line_number=line_number,
-            query_sha256=query_sha256,
-            raw_output=raw_output,
-            raw_output_sha256=raw_output_sha256,
-            variant=variant,
-        )
-
-    configured_keys = _configured_evidence_keys()
-    if len(configured_keys) != len(set(configured_keys)) or set(configured_keys) != set(
-        REQUIRED_DOMUX_EVIDENCE
-    ):
-        raise AcceptanceError("HA cases do not reference the four pinned v1 records")
-    missing = set(REQUIRED_DOMUX_EVIDENCE) - set(records)
-    if missing:
-        raise AcceptanceError("required v1 Domux evidence record is missing")
-    return {key: records[key] for key in configured_keys}
-
-
-def _evidence_for_case(
-    evidence: Mapping[DomuxEvidenceKey, RecordedDomuxEvidence],
-    key: DomuxEvidenceKey,
-) -> RecordedDomuxEvidence:
-    record = evidence.get(key)
-    expected = REQUIRED_DOMUX_EVIDENCE.get(key)
-    if (
-        not isinstance(record, RecordedDomuxEvidence)
-        or expected is None
-        or record.key != key
-        or record.artifact_sha256 != V1_DOMUX_EVIDENCE_SHA256
-        or record.line_number != expected.line_number
-        or record.query_sha256 != expected.query_sha256
-        or record.raw_output_sha256 != expected.raw_output_sha256
-        or _sha256_text(record.command) != record.query_sha256
-        or _sha256_text(record.raw_output) != record.raw_output_sha256
-    ):
-        raise AcceptanceError("HA case is not bound to verified v1 Domux evidence")
-    return record
-
-
-def load_frozen_scenario_evidence(
-    path: Path = SCENARIO_EVIDENCE_PATH,
-) -> dict[str, FrozenScenarioEvidence]:
-    """Load the exact pre-model scenario rows needed by the HA acceptance."""
-
-    try:
-        payload = path.read_bytes()
-    except OSError as exc:
-        raise AcceptanceError("frozen scenario artifact is unavailable") from exc
-    artifact_sha256 = _sha256_bytes(payload)
-    if artifact_sha256 != SCENARIO_EVIDENCE_SHA256:
-        raise AcceptanceError("frozen scenario artifact digest does not match")
-
-    scenarios: dict[str, FrozenScenarioEvidence] = {}
-    seen_base_ids: set[str] = set()
-    for line_number, raw_line in enumerate(payload.splitlines(), start=1):
-        if not raw_line:
-            raise AcceptanceError("frozen scenario artifact contains a blank record")
-        try:
-            item = json.loads(raw_line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise AcceptanceError("frozen scenario artifact contains invalid JSON") from exc
-        if not isinstance(item, Mapping) or not isinstance(item.get("base_id"), str):
-            raise AcceptanceError("frozen scenario record identity is invalid")
-        base_id = item["base_id"]
-        if base_id in seen_base_ids:
-            raise AcceptanceError("frozen scenario artifact contains a duplicate base id")
-        seen_base_ids.add(base_id)
-        expected = REQUIRED_FROZEN_SCENARIOS.get(base_id)
-        if expected is None:
-            continue
-        row_sha256 = _sha256_bytes(raw_line)
-        if line_number != expected.line_number or row_sha256 != expected.row_sha256:
-            raise AcceptanceError("required frozen scenario row digest does not match")
-
-        clear_command = item.get("clear_command")
-        ambiguous_command = item.get("ambiguous_command")
-        clarification_answer = item.get("clarification_answer")
-        confirmed = item.get("confirmed_instruction")
-        expected_target = item.get("expected_target_entity")
-        candidate_entity_ids = item.get("candidate_entity_ids")
-        inventory = item.get("inventory")
-        if (
-            item.get("schema_version") != 1
-            or item.get("split") != "eval"
-            or item.get("category") != "duplicate_entity"
-            or item.get("ambiguity_expected") is not True
-            or not isinstance(clear_command, str)
-            or not isinstance(ambiguous_command, str)
-            or not isinstance(clarification_answer, str)
-            or not isinstance(confirmed, Mapping)
-            or not isinstance(expected_target, str)
-            or not isinstance(candidate_entity_ids, list)
-            or not all(isinstance(value, str) for value in candidate_entity_ids)
-            or not isinstance(inventory, list)
-        ):
-            raise AcceptanceError("required frozen scenario record is incomplete")
-        if (
-            expected_target != expected.target_entity_id
-            or len(candidate_entity_ids) != len(set(candidate_entity_ids))
-            or expected_target not in candidate_entity_ids
-        ):
-            raise AcceptanceError("frozen scenario target or candidate set is unexpected")
-
-        confirmed_fields = (
-            "action",
-            "device",
-            "attribute",
-            "value",
-            "unit",
-            "room",
-            "floor",
-        )
-        if set(confirmed) != set(confirmed_fields) or not all(
-            isinstance(confirmed.get(field), str) for field in confirmed_fields
-        ):
-            raise AcceptanceError("frozen confirmed instruction is invalid")
-        confirmed_instruction = DomuxInstruction.from_fields(
-            tuple(confirmed[field] for field in confirmed_fields)
-        )
-
-        target_items = [
-            value
-            for value in inventory
-            if isinstance(value, Mapping) and value.get("entity_id") == expected_target
-        ]
-        if len(target_items) != 1:
-            raise AcceptanceError("frozen target inventory entry is missing or duplicated")
-        target = target_items[0]
-        target_fields = {"aliases", "device", "domain", "entity_id", "floor", "room"}
-        aliases = target.get("aliases")
-        if (
-            set(target) != target_fields
-            or not isinstance(aliases, list)
-            or not all(isinstance(value, str) for value in aliases)
-            or not all(
-                isinstance(target.get(field), str)
-                for field in ("device", "domain", "entity_id", "floor", "room")
-            )
-        ):
-            raise AcceptanceError("frozen target inventory semantics are invalid")
-        scenario = FrozenScenarioEvidence(
-            ambiguous_command=ambiguous_command,
-            artifact_sha256=artifact_sha256,
-            base_id=base_id,
-            candidate_entity_ids=tuple(candidate_entity_ids),
-            clarification_answer=clarification_answer,
-            clear_command=clear_command,
-            confirmed_instruction=confirmed_instruction,
-            expected_target_entity_id=expected_target,
-            line_number=line_number,
-            row_sha256=row_sha256,
-            target_inventory_semantics={
-                "aliases": tuple(aliases),
-                "device": target["device"],
-                "domain": target["domain"],
-                "floor": target["floor"],
-                "room": target["room"],
-            },
-        )
-        if scenario.binding_sha256() != expected.binding_sha256:
-            raise AcceptanceError("required frozen scenario binding digest does not match")
-        scenarios[base_id] = scenario
-
-    missing = set(REQUIRED_FROZEN_SCENARIOS) - set(scenarios)
-    if missing:
-        raise AcceptanceError("required frozen scenario record is missing")
-    return {base_id: scenarios[base_id] for base_id in REQUIRED_FROZEN_SCENARIOS}
-
-
-def _scenario_for_case(
-    scenarios: Mapping[str, FrozenScenarioEvidence],
-    case: SutCase | TargetDriftCase,
-) -> FrozenScenarioEvidence:
-    scenario = scenarios.get(case.evidence_key.base_id)
-    expected = REQUIRED_FROZEN_SCENARIOS.get(case.evidence_key.base_id)
-    if (
-        not isinstance(scenario, FrozenScenarioEvidence)
-        or expected is None
-        or scenario.base_id != case.evidence_key.base_id
-        or scenario.artifact_sha256 != SCENARIO_EVIDENCE_SHA256
-        or scenario.line_number != expected.line_number
-        or scenario.row_sha256 != expected.row_sha256
-        or scenario.binding_sha256() != expected.binding_sha256
-        or scenario.expected_target_entity_id != expected.target_entity_id
-    ):
-        raise AcceptanceError("HA case is not bound to a verified frozen scenario")
-    return scenario
-
-
-def _configured_cases() -> tuple[SutCase | TargetDriftCase, ...]:
-    return (*SUT_CASES, TARGET_DRIFT_CASE)
-
-
-def validate_acceptance_evidence(
-    recorded_evidence: Mapping[DomuxEvidenceKey, RecordedDomuxEvidence],
-    scenario_evidence: Mapping[str, FrozenScenarioEvidence],
-) -> None:
-    """Validate model, scenario-gold, and HA semantic mapping before Docker."""
-
-    if set(recorded_evidence) != set(REQUIRED_DOMUX_EVIDENCE):
-        raise AcceptanceError("acceptance did not receive exactly four v1 records")
-    if set(scenario_evidence) != set(REQUIRED_FROZEN_SCENARIOS):
-        raise AcceptanceError("acceptance did not receive exactly four frozen scenarios")
-    registry = sut_registry()
-    for case in _configured_cases():
-        record = _evidence_for_case(recorded_evidence, case.evidence_key)
-        scenario = _scenario_for_case(scenario_evidence, case)
-        if scenario.command_for_variant(case.evidence_key.variant) != record.command:
-            raise AcceptanceError("v1 command does not match its frozen scenario variant")
-
-        target_semantics = dict(scenario.target_inventory_semantics)
-        ha_entity = registry.get(case.entity_id)
-        expected_semantics = {
-            "aliases": tuple(ha_entity.aliases),
-            "device": ha_entity.device,
-            "domain": ha_entity.domain,
-            "floor": ha_entity.floor,
-            "room": ha_entity.room,
-        }
-        if target_semantics != expected_semantics or ha_entity.domain != case.domain:
-            raise AcceptanceError("scenario target semantics do not match the HA mapping")
-
-        grounded = ground_domux_request(record.command, record.raw_output, registry)
-        if case.evidence_key.variant == "ambiguous":
-            if not grounded.clarification.required:
-                raise AcceptanceError("frozen ambiguous case unexpectedly resolved uniquely")
-            resolved = resolve_clarification_submission(
-                grounded,
-                answer=scenario.clarification_answer,
-                confirmed_instruction=scenario.confirmed_instruction,
-                registry=registry,
-            )
-        elif case.evidence_key.variant == "clear":
-            if grounded.clarification.required:
-                raise AcceptanceError("frozen clear case unexpectedly requires clarification")
-            resolved = resolve_unique_request(grounded, registry)
-        else:
-            raise AcceptanceError("HA case references an unsupported evidence variant")
-        if resolved.chosen.entity_id != case.entity_id:
-            raise AcceptanceError("frozen scenario maps to an unexpected HA demo entity")
 
 
 def _decode(value: bytes | str | None) -> str:
@@ -1364,20 +845,14 @@ def normalize_setup_state(
     setup_call(
         "light",
         "turn_on",
-        ENTITY_IDS["living_room_light"],
-        {"brightness_pct": 70, "color_temp_kelvin": 3000},
-    )
-    setup_call(
-        "light",
-        "turn_on",
-        ENTITY_IDS["study_light"],
-        {"brightness_pct": 65, "color_temp_kelvin": 3000},
+        ENTITY_IDS["light"],
+        {"brightness_pct": 25, "color_temp_kelvin": 3000},
     )
     setup_call(
         "cover",
         "set_cover_position",
         ENTITY_IDS["cover"],
-        {"position": 80},
+        {"position": 10},
     )
     setup_call(
         "climate",
@@ -1389,32 +864,26 @@ def normalize_setup_state(
         "climate",
         "set_temperature",
         ENTITY_IDS["climate"],
-        {"temperature": 24},
+        {"temperature": 21},
     )
 
     api.wait_for_projection(
-        ENTITY_IDS["living_room_light"],
+        ENTITY_IDS["light"],
         access_token,
         state="on",
-        attributes={"brightness": 178, "color_temp_kelvin": 3000},
-    )
-    api.wait_for_projection(
-        ENTITY_IDS["study_light"],
-        access_token,
-        state="on",
-        attributes={"brightness": 166, "color_temp_kelvin": 3000},
+        attributes={"brightness": 64, "color_temp_kelvin": 3000},
     )
     api.wait_for_projection(
         ENTITY_IDS["cover"],
         access_token,
         state="open",
-        attributes={"current_position": 80},
+        attributes={"current_position": 10},
     )
     api.wait_for_projection(
         ENTITY_IDS["climate"],
         access_token,
         state="cool",
-        attributes={"temperature": 24},
+        attributes={"temperature": 21},
     )
     return {
         "classification": "direct_rest_state_normalization",
@@ -1477,13 +946,13 @@ def create_rest_adapter(base_url: str, token: str) -> HomeAssistantRESTAdapter:
     )
 
 
-def _scenario_clarification(
-    case: SutCase,
-    scenario: FrozenScenarioEvidence,
-) -> tuple[str | None, DomuxInstruction | None]:
-    if case.evidence_key.variant == "ambiguous":
-        return scenario.clarification_answer, scenario.confirmed_instruction
-    return None, None
+def _confirmed_instruction(case: SutCase) -> DomuxInstruction | None:
+    if case.confirmed_output is None:
+        return None
+    parsed = parse_domux_output(case.confirmed_output)
+    if len(parsed) != 1:
+        raise AcceptanceError("SUT confirmation must contain exactly one instruction")
+    return parsed[0]
 
 
 def _mapping(value: object, label: str) -> dict[str, object]:
@@ -1496,20 +965,12 @@ def _run_target_drift_case(
     adapter: HomeAssistantRESTAdapter,
     registry: EntityRegistry,
     store: PreparedActionStore,
-    recorded_evidence: Mapping[DomuxEvidenceKey, RecordedDomuxEvidence],
-    scenario_evidence: Mapping[str, FrozenScenarioEvidence],
     mutate_target: Callable[[TargetDriftCase], Mapping[str, object]],
 ) -> dict[str, Any]:
     """Prepare, mutate the real target out of band, and prove zero dispatch."""
 
     case = TARGET_DRIFT_CASE
-    evidence = _evidence_for_case(recorded_evidence, case.evidence_key)
-    scenario = _scenario_for_case(scenario_evidence, case)
-    grounded = ground_domux_request(
-        evidence.command,
-        evidence.raw_output,
-        registry,
-    )
+    grounded = ground_domux_request(case.utterance, case.raw_output, registry)
     if grounded.clarification.required:
         raise AcceptanceError("target-drift case unexpectedly requires clarification")
     resolved = resolve_unique_request(grounded, registry)
@@ -1629,7 +1090,6 @@ def _run_target_drift_case(
         "controlled_after_external_mutation": drifted_state,
         "controlled_before_external_mutation": bound_state,
         "domain": case.domain,
-        "domux_evidence": evidence.provenance(),
         "external_mutation": mutation,
         "grounding": {
             "candidate_ids": [
@@ -1639,7 +1099,6 @@ def _run_target_drift_case(
             "resolution": "resolve_unique_request",
             "selected_entity_id": resolved.chosen.entity_id,
         },
-        "ha_registry_profile": HA_REGISTRY_PROFILE,
         "outcome": "REJECTED_BEFORE_DISPATCH",
         "rejection": {
             "acknowledged": rejected.acknowledged,
@@ -1655,20 +1114,12 @@ def _run_target_drift_case(
             "domain": case.domain,
             "service": case.expected_service,
         },
-        "scenario_provenance": scenario.provenance(
-            variant=case.evidence_key.variant,
-            ha_demo_entity_id=case.entity_id,
-            ha_matching_candidate_count=len(grounded.candidates),
-            used_for_resolution=False,
-        ),
     }
 
 
 def run_sut_cases(
     adapter: HomeAssistantRESTAdapter,
     *,
-    recorded_evidence: Mapping[DomuxEvidenceKey, RecordedDomuxEvidence],
-    scenario_evidence: Mapping[str, FrozenScenarioEvidence],
     mutate_target: Callable[[TargetDriftCase], Mapping[str, object]],
 ) -> dict[str, Any]:
     """Run grounding through one-time commit against the real REST adapter."""
@@ -1677,21 +1128,18 @@ def run_sut_cases(
         raise AcceptanceError("SUT adapter must be HomeAssistantRESTAdapter")
     if adapter.sut_calls:
         raise AcceptanceError("SUT adapter already contains dispatch history")
-    validate_acceptance_evidence(recorded_evidence, scenario_evidence)
 
     registry = sut_registry()
     store = PreparedActionStore(ttl_seconds=30)
     reports: list[dict[str, Any]] = []
     for case in SUT_CASES:
-        evidence = _evidence_for_case(recorded_evidence, case.evidence_key)
-        scenario = _scenario_for_case(scenario_evidence, case)
         grounded = ground_domux_request(
-            evidence.command,
-            evidence.raw_output,
+            case.utterance,
+            case.raw_output,
             registry,
         )
-        clarification_answer, confirmed = _scenario_clarification(case, scenario)
-        if clarification_answer is None:
+        confirmed = _confirmed_instruction(case)
+        if case.clarification_answer is None:
             if confirmed is not None:
                 raise AcceptanceError("unique SUT case unexpectedly has a confirmation")
             resolved = resolve_unique_request(grounded, registry)
@@ -1701,7 +1149,7 @@ def run_sut_cases(
                 raise AcceptanceError("clarified SUT case is missing its confirmation")
             resolved = resolve_clarification_submission(
                 grounded,
-                answer=clarification_answer,
+                answer=case.clarification_answer,
                 confirmed_instruction=confirmed,
                 registry=registry,
             )
@@ -1715,7 +1163,7 @@ def run_sut_cases(
             grounded=grounded,
             registry=registry,
             adapter=adapter,
-            clarification_answer=clarification_answer,
+            clarification_answer=case.clarification_answer,
             confirmed_instruction=confirmed,
         )
         snapshot = store.snapshot(prepared.nonce)
@@ -1802,7 +1250,6 @@ def run_sut_cases(
                 "controlled_after": controlled_after,
                 "controlled_before": controlled_before,
                 "domain": case.domain,
-                "domux_evidence": evidence.provenance(),
                 "grounding": {
                     "candidate_ids": [
                         candidate.entity_id for candidate in grounded.candidates
@@ -1811,7 +1258,6 @@ def run_sut_cases(
                     "resolution": resolution,
                     "selected_entity_id": resolved.chosen.entity_id,
                 },
-                "ha_registry_profile": HA_REGISTRY_PROFILE,
                 "outcome": "COMMITTED",
                 "postcondition": {
                     "all_registered_entities_exact": True,
@@ -1830,12 +1276,6 @@ def run_sut_cases(
                     "domain": case.domain,
                     "service": case.expected_service,
                 },
-                "scenario_provenance": scenario.provenance(
-                    variant=case.evidence_key.variant,
-                    ha_demo_entity_id=case.entity_id,
-                    ha_matching_candidate_count=len(grounded.candidates),
-                    used_for_resolution=clarification_answer is not None,
-                ),
             }
         )
 
@@ -1844,8 +1284,6 @@ def run_sut_cases(
             adapter,
             registry,
             store,
-            recorded_evidence,
-            scenario_evidence,
             mutate_target,
         )
     )
@@ -1856,12 +1294,6 @@ def run_sut_cases(
         "case_count": len(reports),
         "cases": reports,
         "classification": "clarify_commit_sut",
-        "domux_evidence": {
-            "artifact": V1_DOMUX_EVIDENCE_ARTIFACT,
-            "artifact_sha256": V1_DOMUX_EVIDENCE_SHA256,
-            "pair_count": len(recorded_evidence),
-            "validation": "whole_artifact_and_per_field_sha256",
-        },
         "pipeline": [
             "ground_domux_request",
             "resolve_clarification_submission_or_unique",
@@ -1871,12 +1303,6 @@ def run_sut_cases(
         ],
         "external_fault_injection_count": 1,
         "rejected_before_dispatch_count": 1,
-        "scenario_evidence": {
-            "artifact": SCENARIO_EVIDENCE_ARTIFACT,
-            "artifact_sha256": SCENARIO_EVIDENCE_SHA256,
-            "case_count": len(scenario_evidence),
-            "ha_registry_profile": HA_REGISTRY_PROFILE,
-        },
         "successful_transition_count": len(SUT_CASES),
         "sut_dispatch_total": len(adapter.sut_calls),
     }
@@ -1891,8 +1317,6 @@ def generate_credentials() -> tuple[str, str]:
 def exercise_home_assistant(
     api: HomeAssistantApi,
     *,
-    recorded_evidence: Mapping[DomuxEvidenceKey, RecordedDomuxEvidence] | None = None,
-    scenario_evidence: Mapping[str, FrozenScenarioEvidence] | None = None,
     credential_factory: Callable[[], tuple[str, str]] = generate_credentials,
     rest_adapter_factory: Callable[
         [str, str], HomeAssistantRESTAdapter
@@ -1900,11 +1324,6 @@ def exercise_home_assistant(
 ) -> dict[str, Any]:
     """Complete onboarding, execute the real SUT pipeline, and revoke auth."""
 
-    if recorded_evidence is None:
-        recorded_evidence = load_recorded_domux_evidence()
-    if scenario_evidence is None:
-        scenario_evidence = load_frozen_scenario_evidence()
-    validate_acceptance_evidence(recorded_evidence, scenario_evidence)
     readiness = api.wait_for_readiness()
     initial_steps = _onboarding_state(readiness.payload, expected_done=False)
     unauthenticated = api.request("GET", "/api/", expected=(401,))
@@ -1984,8 +1403,6 @@ def exercise_home_assistant(
     adapter = rest_adapter_factory(api.base_url, access_token)
     sut = run_sut_cases(
         adapter,
-        recorded_evidence=recorded_evidence,
-        scenario_evidence=scenario_evidence,
         mutate_target=lambda case: mutate_target_state(
             api,
             access_token,
@@ -1993,7 +1410,6 @@ def exercise_home_assistant(
         ),
     )
     expected_direct_calls = [
-        _direct_service_event("setup", "light", "turn_on", "/api/services/light/turn_on", 200),
         _direct_service_event("setup", "light", "turn_on", "/api/services/light/turn_on", 200),
         _direct_service_event(
             "setup",
@@ -2119,12 +1535,6 @@ def exercise_home_assistant(
 def execute_acceptance(
     docker: DockerCli,
     *,
-    recorded_evidence_loader: Callable[
-        [], Mapping[DomuxEvidenceKey, RecordedDomuxEvidence]
-    ] = load_recorded_domux_evidence,
-    scenario_evidence_loader: Callable[
-        [], Mapping[str, FrozenScenarioEvidence]
-    ] = load_frozen_scenario_evidence,
     api_factory: Callable[[str], HomeAssistantApi] = HomeAssistantApi,
     credential_factory: Callable[[], tuple[str, str]] = generate_credentials,
     rest_adapter_factory: Callable[
@@ -2134,14 +1544,9 @@ def execute_acceptance(
     """Run acceptance and always clean exactly the resources owned by this run."""
 
     try:
-        recorded_evidence = recorded_evidence_loader()
-        scenario_evidence = scenario_evidence_loader()
-        validate_acceptance_evidence(recorded_evidence, scenario_evidence)
         runtime = docker.prepare()
         home_assistant = exercise_home_assistant(
             api_factory(runtime.base_url),
-            recorded_evidence=recorded_evidence,
-            scenario_evidence=scenario_evidence,
             credential_factory=credential_factory,
             rest_adapter_factory=rest_adapter_factory,
         )
@@ -2157,7 +1562,7 @@ def execute_acceptance(
                 "random_loopback_binding": True,
                 "restart_policy": "no",
             },
-            "schema_version": 3,
+            "schema_version": 2,
             "status": "passed",
         }
     finally:

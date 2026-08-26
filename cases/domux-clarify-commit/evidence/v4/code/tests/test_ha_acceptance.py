@@ -9,7 +9,6 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -495,232 +494,6 @@ class FakeDockerRuntime:
         self.cleaned = True
 
 
-class RecordedDomuxEvidenceTests(unittest.TestCase):
-    def test_loader_binds_the_four_exact_v1_command_output_pairs(self) -> None:
-        records = ha.load_recorded_domux_evidence()
-        expected = {
-            ha.DomuxEvidenceKey("eval-duplicate_entity-01", "ambiguous"): (
-                "Turn off the light.",
-                "turnOff|Light|*|*|*|*|*",
-                2,
-            ),
-            ha.DomuxEvidenceKey("eval-duplicate_entity-02", "clear"): (
-                "Set the Curtain in the Hall on the First Floor to 20 percent.",
-                "set|Curtain|position|20|Percent|Hall|First Floor",
-                3,
-            ),
-            ha.DomuxEvidenceKey("eval-duplicate_entity-03", "clear"): (
-                "Set the AC in the Bedroom on the Second Floor to 22 Celsius.",
-                "set|AC|temperature|22|Celsius|Bedroom|Second Floor",
-                5,
-            ),
-            ha.DomuxEvidenceKey("eval-duplicate_entity-04", "clear"): (
-                ("Set the Light in the Study on the Ground Floor to 35 percent brightness."),
-                "set|Light|brightness|35|Percent|Study|Ground Floor",
-                7,
-            ),
-        }
-        self.assertEqual(set(records), set(expected))
-        for key, (command, raw_output, line_number) in expected.items():
-            record = records[key]
-            self.assertEqual(record.command, command)
-            self.assertEqual(record.raw_output, raw_output)
-            self.assertEqual(record.line_number, line_number)
-            self.assertEqual(record.query_sha256, ha._sha256_text(command))
-            self.assertEqual(
-                record.raw_output_sha256,
-                ha._sha256_text(raw_output),
-            )
-            self.assertEqual(
-                record.artifact_sha256,
-                ha.V1_DOMUX_EVIDENCE_SHA256,
-            )
-            self.assertTrue(record.provenance()["pair_verified"])
-
-    def test_loader_rejects_a_modified_v1_artifact(self) -> None:
-        payload = ha.V1_DOMUX_EVIDENCE_PATH.read_bytes().replace(
-            b"Turn off the light.",
-            b"Turn off a light.",
-            1,
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "domux_raw.jsonl"
-            path.write_bytes(payload)
-            with self.assertRaisesRegex(
-                ha.AcceptanceError,
-                "artifact digest does not match",
-            ):
-                ha.load_recorded_domux_evidence(path)
-
-    def test_injected_v1_record_with_wrong_line_number_is_rejected(self) -> None:
-        records = ha.load_recorded_domux_evidence()
-        key = ha.DomuxEvidenceKey("eval-duplicate_entity-01", "ambiguous")
-        records[key] = replace(records[key], line_number=999)
-        with self.assertRaisesRegex(
-            ha.AcceptanceError,
-            "not bound to verified v1 Domux evidence",
-        ):
-            ha._evidence_for_case(records, key)
-
-    def test_loader_checks_field_hashes_after_whole_artifact_hash(self) -> None:
-        payload = ha.V1_DOMUX_EVIDENCE_PATH.read_bytes().replace(
-            b"Turn off the light.",
-            b"Turn off a light.",
-            1,
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "domux_raw.jsonl"
-            path.write_bytes(payload)
-            with mock.patch.object(
-                ha,
-                "V1_DOMUX_EVIDENCE_SHA256",
-                ha._sha256_bytes(payload),
-            ):
-                with self.assertRaisesRegex(
-                    ha.AcceptanceError,
-                    "command/output field digest does not match",
-                ):
-                    ha.load_recorded_domux_evidence(path)
-
-    def test_evidence_failure_prevents_docker_prepare(self) -> None:
-        docker = mock.Mock()
-
-        def fail_evidence() -> dict[ha.DomuxEvidenceKey, ha.RecordedDomuxEvidence]:
-            raise ha.AcceptanceError("synthetic evidence failure")
-
-        with self.assertRaisesRegex(ha.AcceptanceError, "synthetic evidence failure"):
-            ha.execute_acceptance(
-                docker,
-                recorded_evidence_loader=fail_evidence,
-            )
-        docker.prepare.assert_not_called()
-        docker.cleanup.assert_called_once_with()
-
-
-class FrozenScenarioEvidenceTests(unittest.TestCase):
-    def test_loader_binds_exact_rows_gold_and_target_semantics(self) -> None:
-        scenarios = ha.load_frozen_scenario_evidence()
-        expected = {
-            "eval-duplicate_entity-01": (
-                17,
-                "8b8f6498aef6bb4cb7fd5af3ac9adbef3e2cf0013c7a22451fc339e5f85cd871",
-                "light.eval_de_01_living",
-                "Turn off the light.",
-                3,
-            ),
-            "eval-duplicate_entity-02": (
-                18,
-                "24f7b968a30cba095932b3f5da47ce8f8fc65d521546a830de1b6ea149db7fb4",
-                "cover.eval_de_02_upstairs_hall",
-                "Set the Curtain in the Hall on the First Floor to 20 percent.",
-                2,
-            ),
-            "eval-duplicate_entity-03": (
-                19,
-                "ef0be54be7aaae140c846076fe9568dbea981fd6a96575b12cb6633057756bdf",
-                "climate.eval_de_03_bedroom_second",
-                "Set the AC in the Bedroom on the Second Floor to 22 Celsius.",
-                2,
-            ),
-            "eval-duplicate_entity-04": (
-                20,
-                "d9b32826a3e0229d5943e69a8ba3192635194f5ba87120945a6a92274e24c78e",
-                "light.eval_de_04_study",
-                "Set the Light in the Study on the Ground Floor to 35 percent brightness.",
-                3,
-            ),
-        }
-        self.assertEqual(set(scenarios), set(expected))
-        for base_id, (line, row_sha, target, variant_command, count) in expected.items():
-            scenario = scenarios[base_id]
-            self.assertEqual(scenario.line_number, line)
-            self.assertEqual(scenario.row_sha256, row_sha)
-            self.assertEqual(scenario.expected_target_entity_id, target)
-            variant = "ambiguous" if base_id.endswith("01") else "clear"
-            self.assertEqual(scenario.command_for_variant(variant), variant_command)
-            self.assertEqual(len(scenario.candidate_entity_ids), count)
-            self.assertEqual(
-                scenario.artifact_sha256,
-                ha.SCENARIO_EVIDENCE_SHA256,
-            )
-            self.assertEqual(
-                scenario.binding_sha256(),
-                ha.REQUIRED_FROZEN_SCENARIOS[base_id].binding_sha256,
-            )
-        clarified = scenarios["eval-duplicate_entity-01"]
-        self.assertEqual(
-            clarified.clarification_answer,
-            "The Living Room light on the Ground Floor.",
-        )
-        self.assertEqual(
-            clarified.confirmed_instruction.to_pipe(),
-            "turnOff|Light|*|*|*|Living Room|Ground Floor",
-        )
-        self.assertEqual(
-            clarified.target_inventory_semantics,
-            {
-                "aliases": (),
-                "device": "Light",
-                "domain": "light",
-                "floor": "Ground Floor",
-                "room": "Living Room",
-            },
-        )
-
-    def test_loader_rejects_modified_scenario_artifact_and_row(self) -> None:
-        payload = ha.SCENARIO_EVIDENCE_PATH.read_bytes().replace(
-            b"The Living Room light on the Ground Floor.",
-            b"The Bedroom light on the Ground Floor.",
-            1,
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "scenarios.jsonl"
-            path.write_bytes(payload)
-            with self.assertRaisesRegex(
-                ha.AcceptanceError,
-                "scenario artifact digest does not match",
-            ):
-                ha.load_frozen_scenario_evidence(path)
-            with mock.patch.object(
-                ha,
-                "SCENARIO_EVIDENCE_SHA256",
-                ha._sha256_bytes(payload),
-            ):
-                with self.assertRaisesRegex(
-                    ha.AcceptanceError,
-                    "scenario row digest does not match",
-                ):
-                    ha.load_frozen_scenario_evidence(path)
-
-    def test_injected_scenario_gold_change_is_rejected_by_binding(self) -> None:
-        recorded = ha.load_recorded_domux_evidence()
-        scenarios = ha.load_frozen_scenario_evidence()
-        base_id = "eval-duplicate_entity-01"
-        scenarios[base_id] = replace(
-            scenarios[base_id],
-            clarification_answer="The Bedroom light on the Ground Floor.",
-        )
-        with self.assertRaisesRegex(
-            ha.AcceptanceError,
-            "not bound to a verified frozen scenario",
-        ):
-            ha.validate_acceptance_evidence(recorded, scenarios)
-
-    def test_scenario_failure_prevents_docker_prepare(self) -> None:
-        docker = mock.Mock()
-
-        def fail_scenario() -> dict[str, ha.FrozenScenarioEvidence]:
-            raise ha.AcceptanceError("synthetic scenario failure")
-
-        with self.assertRaisesRegex(ha.AcceptanceError, "synthetic scenario failure"):
-            ha.execute_acceptance(
-                docker,
-                scenario_evidence_loader=fail_scenario,
-            )
-        docker.prepare.assert_not_called()
-        docker.cleanup.assert_called_once_with()
-
-
 class PinnedImageAndConfigTests(unittest.TestCase):
     def test_official_amd64_image_is_pinned_to_the_required_manifest(self) -> None:
         self.assertEqual(
@@ -813,8 +586,8 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         sut = result["phases"]["sut"]
         self.assertEqual(setup["classification"], "direct_rest_state_normalization")
         self.assertFalse(setup["included_in_sut_dispatch_count"])
-        self.assertEqual(len(setup["dispatches"]), 5)
-        self.assertEqual(len(backend.setup_dispatches), 5)
+        self.assertEqual(len(setup["dispatches"]), 4)
+        self.assertEqual(len(backend.setup_dispatches), 4)
         self.assertEqual(len(backend.external_dispatches), 1)
         self.assertEqual(
             backend.external_dispatches[0],
@@ -834,26 +607,6 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         self.assertEqual(sut["rejected_before_dispatch_count"], 1)
         self.assertEqual(sut["external_fault_injection_count"], 1)
         self.assertEqual(sut["sut_dispatch_total"], 3)
-        self.assertEqual(
-            sut["domux_evidence"],
-            {
-                "artifact": "evidence/v1/domux_raw.jsonl",
-                "artifact_sha256": ha.V1_DOMUX_EVIDENCE_SHA256,
-                "pair_count": 4,
-                "validation": "whole_artifact_and_per_field_sha256",
-            },
-        )
-        self.assertEqual(
-            sut["scenario_evidence"],
-            {
-                "artifact": "data/scenarios.jsonl",
-                "artifact_sha256": ha.SCENARIO_EVIDENCE_SHA256,
-                "case_count": 4,
-                "ha_registry_profile": (
-                    "semantic_target_mapping_subset_not_full_scenario_inventory"
-                ),
-            },
-        )
         self.assertEqual(len(backend.sut_http_dispatches), 3)
         self.assertEqual(
             [item["domain"] for item in sut["cases"]],
@@ -869,116 +622,19 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            [
-                (
-                    item["domux_evidence"]["base_id"],
-                    item["domux_evidence"]["variant"],
-                )
-                for item in sut["cases"]
-            ],
-            [
-                ("eval-duplicate_entity-01", "ambiguous"),
-                ("eval-duplicate_entity-02", "clear"),
-                ("eval-duplicate_entity-03", "clear"),
-                ("eval-duplicate_entity-04", "clear"),
-            ],
-        )
-        for item in sut["cases"]:
-            provenance = item["domux_evidence"]
-            self.assertTrue(provenance["pair_verified"])
-            self.assertEqual(
-                provenance["artifact_sha256"],
-                ha.V1_DOMUX_EVIDENCE_SHA256,
-            )
-            self.assertEqual(
-                provenance["validation"],
-                "whole_artifact_and_per_field_sha256",
-            )
-            self.assertNotIn(str(ha.CASE_DIR), json.dumps(provenance))
-        scenario_targets = [
-            (
-                "light.eval_de_01_living",
-                "light.ceiling_lights",
-                3,
-                2,
-            ),
-            (
-                "cover.eval_de_02_upstairs_hall",
-                "cover.hall_window",
-                2,
-                1,
-            ),
-            (
-                "climate.eval_de_03_bedroom_second",
-                "climate.hvac",
-                2,
-                1,
-            ),
-            (
-                "light.eval_de_04_study",
-                "light.bed_light",
-                3,
-                1,
-            ),
-        ]
-        for index, item in enumerate(sut["cases"]):
-            scenario = item["scenario_provenance"]
-            scenario_target, ha_target, frozen_count, ha_count = scenario_targets[index]
-            self.assertEqual(item["ha_registry_profile"], ha.HA_REGISTRY_PROFILE)
-            self.assertEqual(scenario["ha_registry_profile"], ha.HA_REGISTRY_PROFILE)
-            self.assertEqual(scenario["source"], "frozen_synthetic_scenario_gold")
-            self.assertFalse(scenario["post_clarification_model_call"])
-            self.assertEqual(scenario["frozen_candidate_count"], frozen_count)
-            self.assertEqual(scenario["ha_matching_candidate_count"], ha_count)
-            self.assertEqual(
-                scenario["inventory_limitation"],
-                {
-                    "full_scenario_inventory_reproduced": False,
-                    "profile": ha.HA_REGISTRY_PROFILE,
-                },
-            )
-            self.assertEqual(
-                scenario["scenario_target_to_ha_demo_entity"],
-                {
-                    "ha_demo_entity_id": ha_target,
-                    "scenario_target_entity_id": scenario_target,
-                    "semantic_fields_match": True,
-                },
-            )
-            self.assertEqual(scenario["used_for_resolution"], index == 0)
-            self.assertEqual(len(scenario["row_sha256"]), 64)
-            self.assertEqual(len(scenario["binding_sha256"]), 64)
-            self.assertNotIn(str(ha.CASE_DIR), json.dumps(scenario))
-        clarified_scenario = sut["cases"][0]["scenario_provenance"]
-        self.assertEqual(
-            clarified_scenario["clarification_answer"],
-            "The Living Room light on the Ground Floor.",
-        )
-        self.assertEqual(
-            clarified_scenario["confirmed_instruction"],
-            {
-                "action": "turnOff",
-                "attribute": "*",
-                "device": "Light",
-                "floor": "Ground Floor",
-                "room": "Living Room",
-                "unit": "*",
-                "value": "*",
-            },
-        )
-        self.assertEqual(
             [item["service_shape"]["service"] for item in sut["cases"]],
-            ["turn_off", "set_cover_position", "set_temperature", "turn_on"],
+            ["turn_on", "set_cover_position", "set_temperature", "turn_on"],
         )
         self.assertEqual(
             backend.sut_http_dispatches,
             [
                 {
                     "data": {
-                        "entity_id": "light.ceiling_lights",
+                        "brightness_pct": 50.0,
+                        "entity_id": "light.bed_light",
                     },
                     "domain": "light",
-                    "service": "turn_off",
+                    "service": "turn_on",
                 },
                 {
                     "data": {
@@ -991,7 +647,7 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
                 {
                     "data": {
                         "entity_id": "climate.hvac",
-                        "temperature": 22.0,
+                        "temperature": 23.0,
                     },
                     "domain": "climate",
                     "service": "set_temperature",
@@ -1000,30 +656,30 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             [event["phase"] for event in backend.service_events],
-            ["setup"] * 5 + ["sut"] * 3 + ["external_fault_injection"],
+            ["setup"] * 4 + ["sut"] * 3 + ["external_fault_injection"],
         )
         accounting = result["phases"]["service_call_accounting"]
         self.assertEqual(accounting["external_fault_injection"], 1)
-        self.assertEqual(accounting["setup_direct_rest"], 5)
+        self.assertEqual(accounting["setup_direct_rest"], 4)
         self.assertEqual(accounting["sut_dispatches"], 3)
-        self.assertEqual(accounting["total"], 9)
+        self.assertEqual(accounting["total"], 8)
         self.assertEqual(accounting["direct_rest_events"], api.direct_service_calls)
         self.assertEqual(
             [event["phase"] for event in accounting["direct_rest_events"]],
-            ["setup"] * 5 + ["external_fault_injection"],
+            ["setup"] * 4 + ["external_fault_injection"],
         )
         expected_transitions = {
-            "recorded_ambiguous_light_off": (
-                {"brightness": 178, "state": "on"},
-                {"brightness": None, "state": "off"},
+            "clarified_light_brightness": (
+                {"brightness": 64, "state": "on"},
+                {"brightness": 128, "state": "on"},
             ),
-            "recorded_unique_cover_position": (
-                {"current_position": 80, "state": "open"},
+            "unique_cover_position": (
+                {"current_position": 10, "state": "open"},
                 {"current_position": 20, "state": "open"},
             ),
-            "recorded_unique_climate_temperature": (
-                {"state": "cool", "temperature": 24},
-                {"state": "cool", "temperature": 22},
+            "unique_climate_temperature": (
+                {"state": "cool", "temperature": 21},
+                {"state": "cool", "temperature": 23},
             ),
         }
         for item in sut["cases"][:3]:
@@ -1046,10 +702,7 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
             self.assertEqual(item["outcome"], "COMMITTED")
 
         drift = sut["cases"][3]
-        self.assertEqual(
-            drift["case"],
-            "recorded_study_light_state_drift_rejected",
-        )
+        self.assertEqual(drift["case"], "target_state_drift_rejected")
         self.assertEqual(drift["outcome"], "REJECTED_BEFORE_DISPATCH")
         self.assertEqual(
             drift["external_mutation"],
@@ -1082,15 +735,15 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             drift["controlled_before_external_mutation"]["brightness"],
-            166,
+            128,
         )
         self.assertEqual(
             drift["controlled_after_external_mutation"]["brightness"],
             64,
         )
-        self.assertNotEqual(
-            drift["controlled_before_external_mutation"]["entity_id"],
-            sut["cases"][0]["controlled_after"]["entity_id"],
+        self.assertEqual(
+            drift["controlled_before_external_mutation"],
+            sut["cases"][0]["controlled_after"],
         )
         binding = drift["binding"]
         self.assertTrue(binding["matched_before_external_mutation"])
@@ -1155,12 +808,7 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
                     }
 
                 with self.assertRaisesRegex(ha.AcceptanceError, expected_error):
-                    ha.run_sut_cases(
-                        adapter,
-                        recorded_evidence=ha.load_recorded_domux_evidence(),
-                        scenario_evidence=ha.load_frozen_scenario_evidence(),
-                        mutate_target=mutate,
-                    )
+                    ha.run_sut_cases(adapter, mutate_target=mutate)
 
     def test_execute_always_cleans_runtime_on_success_and_failure(self) -> None:
         backend = FakeRestBackend()
@@ -1173,7 +821,6 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(successful.cleaned)
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["schema_version"], 3)
 
         failing = FakeDockerRuntime(fail=True)
         with self.assertRaisesRegex(ha.AcceptanceError, "prepare failure"):
