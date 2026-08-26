@@ -5,7 +5,7 @@ import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -37,6 +37,7 @@ from clarify_commit import (  # noqa: E402
     projection_matches,
     resolve_clarification,
     resolve_clarification_submission,
+    resolve_unique_request,
 )
 
 
@@ -176,6 +177,1262 @@ class GroundingTests(unittest.TestCase):
         candidates = self.registry.candidates(instruction, context)
         self.assertEqual(len(candidates), 2)
         self.assertTrue(clarification_for(candidates).required)
+
+    def test_directionless_adjust_never_authorizes_a_model_direction(self) -> None:
+        cases = (
+            (
+                "Adjust the Study curtain by 10 percent.",
+                "adjustUp|Curtain|position|10|Percent|Study|Ground Floor",
+            ),
+            (
+                "Adjust the Study light by 10 percent.",
+                "adjustDown|Light|brightness|10|Percent|Study|Ground Floor",
+            ),
+            (
+                "Adjust the Study AC by 2 degrees.",
+                "adjustUp|AC|temperature|2|Celsius|Study|Ground Floor",
+            ),
+        )
+        for utterance, raw_output in cases:
+            with self.subTest(raw_output=raw_output):
+                grounded = ground_domux_request(utterance, raw_output, self.registry)
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("action", grounded.clarification.unresolved_slots)
+
+    def test_adjust_direction_words_are_operation_scoped(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("climate.lower", "climate", "AC", "Landing", "Lower Floor"),
+        ))
+        rejected = (
+            (
+                "Adjust the Lower Floor AC.",
+                "adjustDown|AC|temperature|*|*|*|Lower Floor",
+            ),
+            (
+                "Set the Lower Floor AC to Cool mode.",
+                "adjustDown|AC|temperature|*|*|*|Lower Floor",
+            ),
+            (
+                "Make the Lower Floor AC cooler mode.",
+                "adjustDown|AC|temperature|*|*|*|Lower Floor",
+            ),
+            (
+                "Raise the Lower Floor AC by 2 degrees.",
+                "adjustDown|AC|temperature|2|Celsius|*|Lower Floor",
+            ),
+            (
+                "Lower the Lower Floor AC by 2 degrees.",
+                "adjustUp|AC|temperature|2|Celsius|*|Lower Floor",
+            ),
+            (
+                "Make the Lower Floor AC warmer or cooler.",
+                "adjustUp|AC|temperature|*|*|*|Lower Floor",
+            ),
+        )
+        for utterance, raw_output in rejected:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(utterance, raw_output, registry)
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("action", grounded.clarification.unresolved_slots)
+
+        accepted = (
+            (
+                "Make the Lower Floor AC warmer.",
+                "adjustUp|AC|temperature|*|*|*|Lower Floor",
+            ),
+            (
+                "Make the Lower Floor AC cooler.",
+                "adjustDown|AC|temperature|*|*|*|Lower Floor",
+            ),
+        )
+        for utterance, raw_output in accepted:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(utterance, raw_output, registry)
+                self.assertNotIn("action", grounded.clarification.unresolved_slots)
+
+    def test_unregistered_floor_is_unresolved_not_an_ontology_guess(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("climate.landing", "climate", "AC", "Landing", "First Floor"),
+            EntitySpec("climate.loft", "climate", "AC", "Loft", "Second Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Set the upstairs AC to 21 degrees.",
+            "set|AC|temperature|21|Celsius|*|Upstairs",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("climate.landing", "climate.loft"),
+        )
+        self.assertTrue(grounded.clarification.required)
+        self.assertIn("floor", grounded.clarification.unresolved_slots)
+        resolved = resolve_clarification_submission(
+            grounded,
+            answer="Use 21 Celsius for the Landing AC on the First Floor.",
+            confirmed_instruction=DomuxInstruction(
+                "set", "AC", "temperature", "21", "Celsius", "Landing", "First Floor"
+            ),
+            registry=registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "climate.landing")
+
+        singleton = EntityRegistry((
+            EntitySpec("climate.only", "climate", "AC", "Landing", "First Floor"),
+        ))
+        singleton_grounded = ground_domux_request(
+            "Set the upstairs AC to 21 degrees.",
+            "set|AC|temperature|21|Celsius|*|Upstairs",
+            singleton,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in singleton_grounded.candidates),
+            ("climate.only",),
+        )
+        self.assertTrue(singleton_grounded.clarification.required)
+        self.assertIn("floor", singleton_grounded.clarification.unresolved_slots)
+
+        omitted_by_model = ground_domux_request(
+            "Set the upstairs AC to 21 degrees.",
+            "set|AC|temperature|21|Celsius|*|*",
+            singleton,
+        )
+        self.assertTrue(omitted_by_model.clarification.required)
+        self.assertIn("device", omitted_by_model.clarification.unresolved_slots)
+        with self.assertRaisesRegex(GroundingError, "explicitly identify"):
+            resolve_clarification_submission(
+                omitted_by_model,
+                answer="Yes.",
+                confirmed_instruction=DomuxInstruction(
+                    "set", "AC", "temperature", "21", "Celsius", "Landing", "First Floor"
+                ),
+                registry=singleton,
+            )
+
+    def test_unregistered_compound_device_falls_back_only_to_clarification(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.dining", "light", "Light", "Dining Room", "Ground Floor"),
+            EntitySpec("cover.dining", "cover", "Curtain", "Dining Room", "Ground Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Make the dining light Blue—no, perhaps Green; confirm the color.",
+            "set|Dining Light|color|Green|*|Dining Room|*",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.dining",),
+        )
+        self.assertTrue(grounded.clarification.required)
+        self.assertIn("device", grounded.clarification.unresolved_slots)
+        resolved = resolve_clarification_submission(
+            grounded,
+            answer="Confirm Green for the Dining Room light.",
+            confirmed_instruction=DomuxInstruction(
+                "set", "Light", "color", "Green", "*", "Dining Room", "Ground Floor"
+            ),
+            registry=registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "light.dining")
+
+    def test_partial_room_token_with_generic_device_never_becomes_canonical(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.dining", "light", "Light", "Dining Room", "Ground Floor"),
+            EntitySpec("cover.dining", "cover", "Curtain", "Dining Room", "Ground Floor"),
+        ))
+        for raw_output in (
+            "set|Dining Light|color|Green|*|Dining Room|*",
+            "set|Light|color|Green|*|*|*",
+            "set|Light|color|Green|*|Dining Room|*",
+        ):
+            with self.subTest(raw_output=raw_output):
+                grounded = ground_domux_request(
+                    "Set the dining light to Green.",
+                    raw_output,
+                    registry,
+                )
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("light.dining",),
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("room", grounded.clarification.unresolved_slots)
+
+        canonical = ground_domux_request(
+            "Set the Dining Room light to Green.",
+            "set|Light|color|Green|*|Dining Room|*",
+            registry,
+        )
+        self.assertFalse(canonical.clarification.required)
+
+        registered_compound = EntityRegistry((
+            EntitySpec("light.dining_named", "light", "Dining Light", "Atrium", "Ground Floor"),
+        ))
+        compound = ground_domux_request(
+            "Set the Dining Light in the Atrium to Green.",
+            "set|Dining Light|color|Green|*|Atrium|*",
+            registered_compound,
+        )
+        self.assertFalse(compound.clarification.required)
+
+        overlapping_rooms = EntityRegistry((
+            EntitySpec("light.reading_room", "light", "Light", "Reading Room", "First Floor"),
+            EntitySpec("light.reading_nook", "light", "Light", "Reading Nook", "First Floor"),
+        ))
+        exact_overlap = ground_domux_request(
+            "Turn off the Reading Room light.",
+            "turnOff|Light|*|*|*|Reading Room|*",
+            overlapping_rooms,
+        )
+        self.assertFalse(exact_overlap.clarification.required)
+
+    def test_deictic_context_precedes_a_model_only_domain_guess(self) -> None:
+        context = SessionContext(("light.living_ceiling", "light.study_ceiling"))
+        grounded = ground_domux_request(
+            "Make that one warmer.",
+            "adjustUp|AC|temperature|*|*|*|*",
+            self.registry,
+            context,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.living_ceiling", "light.study_ceiling"),
+        )
+        self.assertTrue(grounded.clarification.required)
+        resolved = resolve_clarification_submission(
+            grounded,
+            answer="Set the Living Room light to 3000 Kelvin.",
+            confirmed_instruction=DomuxInstruction(
+                "set", "Light", "colorTemperature", "3000", "Kelvin",
+                "Living Room", "Ground Floor",
+            ),
+            registry=self.registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "light.living_ceiling")
+
+        wrong_room = ground_domux_request(
+            "Turn it off.",
+            "turnOff|AC|*|*|*|Utility Room|Ground Floor",
+            self.registry,
+            context,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in wrong_room.candidates),
+            ("light.living_ceiling", "light.study_ceiling"),
+        )
+        self.assertNotIn("climate.study_ac", {
+            entity.entity_id for entity in wrong_room.candidates
+        })
+        self.assertTrue(wrong_room.clarification.required)
+
+    def test_deictic_context_can_be_narrowed_by_an_explicit_user_domain(self) -> None:
+        context = SessionContext(("light.study_ceiling", "cover.study_curtain"))
+        grounded = ground_domux_request(
+            "Turn that light off.",
+            "turnOff|Light|*|*|*|*|*",
+            self.registry,
+            context,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.study_ceiling",),
+        )
+        self.assertFalse(grounded.clarification.required)
+
+        wrong_model_domain = ground_domux_request(
+            "Turn that light off.",
+            "turnOff|AC|*|*|*|*|*",
+            self.registry,
+            context,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in wrong_model_domain.candidates),
+            ("light.study_ceiling",),
+        )
+        self.assertTrue(wrong_model_domain.clarification.required)
+
+        no_context_match = ground_domux_request(
+            "Turn that light off.",
+            "turnOff|Light|*|*|*|*|*",
+            self.registry,
+            SessionContext(("cover.study_curtain",)),
+        )
+        self.assertEqual(no_context_match.candidates, ())
+        self.assertTrue(no_context_match.clarification.required)
+
+    def test_stale_deictic_context_never_falls_back_to_a_global_singleton(self) -> None:
+        context = SessionContext(("missing.old_entity", "light.study_ceiling"))
+        grounded = ground_domux_request(
+            "Turn it off.",
+            "turnOff|*|*|*|*|*|*",
+            self.registry,
+            context,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.study_ceiling",),
+        )
+        self.assertTrue(grounded.clarification.required)
+        self.assertIn("stale_context_reference", grounded.clarification.reasons)
+        self.assertIn("context", grounded.clarification.unresolved_slots)
+
+        all_stale = ground_domux_request(
+            "Turn it off.",
+            "turnOff|*|*|*|*|*|*",
+            self.registry,
+            SessionContext(("missing.old_entity",)),
+        )
+        self.assertEqual(all_stale.candidates, ())
+        self.assertTrue(all_stale.clarification.required)
+
+    def test_deictic_request_without_context_requires_an_explicit_target(self) -> None:
+        singleton = EntityRegistry((
+            EntitySpec("light.only", "light", "Light", "Study", "Ground Floor"),
+        ))
+        unresolved = ground_domux_request(
+            "Turn it off.",
+            "turnOff|*|*|*|*|*|*",
+            singleton,
+        )
+        self.assertTrue(unresolved.clarification.required)
+        self.assertIn("unsupported_request_grammar", unresolved.clarification.reasons)
+        self.assertIn("authorization", unresolved.clarification.unresolved_slots)
+
+        explicit = ground_domux_request(
+            "Turn that Study light off.",
+            "turnOff|Light|*|*|*|Study|*",
+            singleton,
+        )
+        self.assertFalse(explicit.clarification.required)
+
+    def test_explicit_selector_zero_match_never_falls_back_to_model_or_context(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("cover.kitchen", "cover", "Curtain", "Kitchen", "Ground Floor"),
+        ))
+        for raw_output in (
+            "turnOff|Light|*|*|*|*|*",
+            "turnOff|Light|*|*|*|Kitchen|*",
+            "turnOff|Light|*|*|*|Study|*",
+        ):
+            with self.subTest(raw_output=raw_output):
+                grounded = ground_domux_request(
+                    "Turn off the Kitchen light.",
+                    raw_output,
+                    registry,
+                )
+                self.assertEqual(grounded.candidates, ())
+                self.assertTrue(grounded.clarification.required)
+
+        contextual = ground_domux_request(
+            "Turn that Kitchen light off.",
+            "turnOff|Light|*|*|*|Kitchen|*",
+            registry,
+            SessionContext(("light.study",)),
+        )
+        self.assertEqual(contextual.candidates, ())
+        self.assertTrue(contextual.clarification.required)
+
+        with_kitchen_light = EntityRegistry((
+            *registry.entities,
+            EntitySpec("light.kitchen", "light", "Light", "Kitchen", "Ground Floor"),
+        ))
+        positive = ground_domux_request(
+            "Turn off the Kitchen light.",
+            "turnOff|Light|*|*|*|*|*",
+            with_kitchen_light,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in positive.candidates),
+            ("light.kitchen",),
+        )
+        self.assertFalse(positive.clarification.required)
+
+    def test_same_span_room_and_alias_interpretations_are_not_anded(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study_a", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec(
+                "light.study_b", "light", "Light", "Study", "Ground Floor", ("Study",),
+            ),
+        ))
+        grounded = ground_domux_request(
+            "Turn off the Study light.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.study_a", "light.study_b"),
+        )
+        self.assertTrue(grounded.clarification.required)
+
+    def test_overlapping_room_and_specific_device_interpretations_remain_ambiguous(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("light.named", "light", "Study Light", "Atrium", "Ground Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Turn off the Study light.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.named", "light.study"),
+        )
+        self.assertTrue(grounded.clarification.required)
+
+    def test_inventory_words_in_ordinary_prose_are_not_target_selectors(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.right", "light", "Light", "Right", "Ground Floor"),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Turn the light off right now.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.right", "light.study"),
+        )
+        contextual = ground_domux_request(
+            "Turn that light off right now.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+            SessionContext(("light.right", "light.study")),
+        )
+        self.assertEqual(len(contextual.candidates), 2)
+
+        alias_registry = EntityRegistry((
+            EntitySpec(
+                "light.alias", "light", "Light", "Living Room", "Ground Floor", ("Right",),
+            ),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        alias_collision = ground_domux_request(
+            "Turn the light off right now.",
+            "turnOff|Light|*|*|*|*|*",
+            alias_registry,
+        )
+        self.assertEqual(len(alias_collision.candidates), 2)
+
+    def test_relational_room_phrases_never_fall_back_to_a_global_singleton(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("cover.kitchen", "cover", "Curtain", "Kitchen", "Ground Floor"),
+        ))
+        for phrase in ("my room", "the right room", "any room"):
+            with self.subTest(phrase=phrase):
+                grounded = ground_domux_request(
+                    f"Turn off the light in {phrase}.",
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("room", grounded.clarification.unresolved_slots)
+                with self.assertRaisesRegex(GroundingError, "repaired target"):
+                    resolve_clarification_submission(
+                        grounded,
+                        answer="Yes.",
+                        confirmed_instruction=DomuxInstruction(
+                            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+                        ),
+                        registry=registry,
+                    )
+
+        explicit = ground_domux_request(
+            "Turn off the light in Study.",
+            "turnOff|Light|*|*|*|Study|*",
+            registry,
+        )
+        self.assertFalse(explicit.clarification.required)
+
+    def test_partial_selector_detection_is_limited_to_selector_positions(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "First Floor"),
+        ))
+        sequence_word = ground_domux_request(
+            "First, turn off the Study light on the First Floor.",
+            "turnOff|Light|*|*|*|Study|First Floor",
+            registry,
+        )
+        self.assertNotIn("floor", sequence_word.clarification.unresolved_slots)
+
+        lower_registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Lower Floor"),
+        ))
+        operation_word = ground_domux_request(
+            "Lower the Study light brightness.",
+            "adjustDown|Light|brightness|*|*|Study|*",
+            lower_registry,
+        )
+        self.assertNotIn("floor", operation_word.clarification.unresolved_slots)
+
+    def test_context_selector_is_a_true_intersection(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("light.kitchen", "light", "Light", "Kitchen", "Ground Floor"),
+        ))
+        only_study = ground_domux_request(
+            "Turn that Kitchen light off.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+            SessionContext(("light.study",)),
+        )
+        self.assertEqual(only_study.candidates, ())
+
+        both = ground_domux_request(
+            "Turn that Kitchen light off.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+            SessionContext(("light.study", "light.kitchen")),
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in both.candidates),
+            ("light.kitchen",),
+        )
+
+        stale = ground_domux_request(
+            "Turn that Kitchen light off.",
+            "turnOff|Light|*|*|*|*|*",
+            registry,
+            SessionContext(("missing.kitchen", "light.study")),
+        )
+        self.assertEqual(stale.candidates, ())
+        self.assertIn("stale_context_reference", stale.clarification.reasons)
+
+    def test_other_reference_never_collapses_to_a_single_context_target(self) -> None:
+        no_context = ground_domux_request(
+            "Turn the other light off.",
+            "turnOff|Light|*|*|*|*|*",
+            self.registry,
+        )
+        self.assertEqual(no_context.candidates, ())
+        self.assertIn("unsupported_request_grammar", no_context.clarification.reasons)
+
+        one_context = ground_domux_request(
+            "Turn the other light off.",
+            "turnOff|Light|*|*|*|*|*",
+            self.registry,
+            SessionContext(("light.study_ceiling",)),
+        )
+        self.assertEqual(one_context.candidates, ())
+
+        heterogeneous = ground_domux_request(
+            "Turn the other light off.",
+            "turnOff|Light|*|*|*|Study|*",
+            self.registry,
+            SessionContext(("light.study_ceiling", "cover.study_curtain")),
+        )
+        self.assertEqual(heterogeneous.candidates, ())
+
+        two_lights = ground_domux_request(
+            "Turn the other light off.",
+            "turnOff|Light|*|*|*|Study|*",
+            self.registry,
+            SessionContext(("light.living_ceiling", "light.study_ceiling")),
+        )
+        self.assertEqual(len(two_lights.candidates), 2)
+        self.assertIn("other_reference_requires_selection", two_lights.clarification.reasons)
+        with self.assertRaises(GroundingError):
+            resolve_clarification_submission(
+                two_lights,
+                answer="Yes.",
+                confirmed_instruction=DomuxInstruction(
+                    "turnOff", "Ceiling Light", "*", "*", "*", "Study", "Ground Floor"
+                ),
+                registry=self.registry,
+            )
+        selected = resolve_clarification_submission(
+            two_lights,
+            answer="2",
+            confirmed_instruction=DomuxInstruction(
+                "turnOff", "Ceiling Light", "*", "*", "*", "Study", "Ground Floor"
+            ),
+            registry=self.registry,
+        )
+        self.assertEqual(selected.chosen.entity_id, "light.study_ceiling")
+
+    def test_multi_token_selector_spans_do_not_hide_a_second_partial_selector(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.dining", "light", "Light", "Dining Room", "Ground Floor"),
+            EntitySpec("cover.study", "cover", "Curtain", "Study", "Ground Floor"),
+        ))
+        contradictory = ground_domux_request(
+            "Set the dining light in Study to Green.",
+            "set|Light|color|Green|*|*|*",
+            registry,
+        )
+        self.assertEqual(contradictory.candidates, ())
+        self.assertIn("room", contradictory.clarification.unresolved_slots)
+
+        exact = ground_domux_request(
+            "Set the Dining Room light to Green.",
+            "set|Light|color|Green|*|Dining Room|*",
+            registry,
+        )
+        self.assertFalse(exact.clarification.required)
+
+        named_device = EntityRegistry((
+            EntitySpec("light.named", "light", "Dining Light", "Atrium", "Ground Floor"),
+        ))
+        complete_device = ground_domux_request(
+            "Set the Dining Light in the Atrium to Green.",
+            "set|Dining Light|color|Green|*|Atrium|*",
+            named_device,
+        )
+        self.assertFalse(complete_device.clarification.required)
+
+    def test_negated_relative_directions_cannot_authorize_adjustment(self) -> None:
+        cases = (
+            ("Do not increase the Study light brightness.", "adjustUp"),
+            ("Don't decrease the Study light brightness.", "adjustDown"),
+            ("Never make the Study light brighter.", "adjustUp"),
+            ("No increase for the Study light brightness.", "adjustUp"),
+            ("Make the Study AC not warmer.", "adjustUp"),
+            ("No dimmer for the Study light.", "adjustDown"),
+        )
+        for utterance, action in cases:
+            raw_output = (
+                f"{action}|AC|temperature|*|*|Study|*"
+                if "AC" in utterance
+                else f"{action}|Light|brightness|*|*|Study|*"
+            )
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(utterance, raw_output, self.registry)
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("negative_or_cancelled_intent", grounded.clarification.reasons)
+                self.assertIn("action", grounded.clarification.unresolved_slots)
+
+        for utterance, action in (
+            ("Make the Study light not any brighter.", "adjustUp"),
+            ("Make the Study light not any dimmer.", "adjustDown"),
+            ("Make the Study light anything but brighter.", "adjustUp"),
+            ("Make the Study light other than dimmer.", "adjustDown"),
+            ("I don't want the Study light brighter.", "adjustUp"),
+            ("No need for a brighter Study light.", "adjustUp"),
+            ("No need for a dimmer Study light.", "adjustDown"),
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    f"{action}|Light|brightness|*|*|Study|*",
+                    self.registry,
+                )
+                self.assertIn("negative_or_cancelled_intent", grounded.clarification.reasons)
+                with self.assertRaisesRegex(GroundingError, "negated"):
+                    resolve_clarification_submission(
+                        grounded,
+                        answer="Confirm the Study light on the Ground Floor.",
+                        confirmed_instruction=DomuxInstruction(
+                            action, "Light", "brightness", "*", "*", "Study", "Ground Floor"
+                        ),
+                        registry=self.registry,
+                    )
+
+    def test_negative_selector_spans_never_become_positive_target_constraints(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.living", "light", "Light", "Living Room", "Ground Floor"),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        for utterance in (
+            "Turn off the light, but not the light in Study.",
+            "Turn off the light, but not any one in Study.",
+            "Turn off the light, but not a light in Study.",
+            "Turn off the light, anything but a light in Study.",
+            "Turn off a light, but don't use the light in Study.",
+            "Turn off a light, but do not use my device in Study.",
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertEqual(
+                    tuple(entity.entity_id for entity in grounded.candidates),
+                    ("light.living", "light.study"),
+                )
+                self.assertIn("light.study", grounded.negated_entity_ids)
+                self.assertTrue(grounded.clarification.required)
+                with self.assertRaises(GroundingError):
+                    resolve_clarification_submission(
+                        grounded,
+                        answer="Yes.",
+                        confirmed_instruction=DomuxInstruction(
+                            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+                        ),
+                        registry=registry,
+                    )
+
+    def test_target_repair_must_answer_the_unresolved_selector_slot(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("cover.kitchen", "cover", "Curtain", "Kitchen", "Ground Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Turn off the Study or Kitchen light.",
+            "turnOff|Light|*|*|*|Study|Ground Floor",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("light.study",),
+        )
+        self.assertIn("room", grounded.clarification.unresolved_slots)
+        confirmed = DomuxInstruction(
+            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+        )
+        with self.assertRaisesRegex(GroundingError, "repaired target"):
+            resolve_clarification_submission(
+                grounded,
+                answer="The Ground Floor.",
+                confirmed_instruction=confirmed,
+                registry=registry,
+            )
+        resolved = resolve_clarification_submission(
+            grounded,
+            answer="The Study light.",
+            confirmed_instruction=confirmed,
+            registry=registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "light.study")
+
+    def test_clarification_selector_slots_cannot_form_a_zero_match_target(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("climate.kitchen", "climate", "AC", "Kitchen", "First Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Turn off the device.",
+            "turnOff|*|*|*|*|*|*",
+            registry,
+        )
+        with self.assertRaisesRegex(GroundingError, "inconsistent target selectors"):
+            resolve_clarification_submission(
+                grounded,
+                answer="Turn off the Study AC.",
+                confirmed_instruction=DomuxInstruction(
+                    "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+                ),
+                registry=registry,
+            )
+
+    def test_operation_only_answer_is_allowed_when_original_target_is_fully_bound(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("climate.lab", "climate", "AC", "Test Lab", "Ground Floor"),
+            EntitySpec("light.utility", "light", "Utility Light", "Utility Room", "Basement"),
+        ))
+        grounded = ground_domux_request(
+            "Set the Test Lab AC.",
+            "set|AC|temperature|22|Celsius|Test Lab|Ground Floor",
+            registry,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("climate.lab",),
+        )
+        self.assertTrue(grounded.clarification.required)
+        resolved = resolve_clarification_submission(
+            grounded,
+            answer="Temperature 22 Celsius.",
+            confirmed_instruction=DomuxInstruction(
+                "set", "AC", "temperature", "22", "Celsius", "Test Lab", "Ground Floor"
+            ),
+            registry=registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "climate.lab")
+
+    def test_unknown_attribute_position_and_relational_context_require_target_repair(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("climate.dining", "climate", "AC", "Dining Room", "Ground Floor"),
+            EntitySpec("climate.lounge", "climate", "AC", "Lounge", "Ground Floor"),
+        ))
+        grounded = ground_domux_request(
+            "Set the downstairs temperature to 24.",
+            "set|AC|temperature|24|Celsius|Dining Room|Ground Floor",
+            registry,
+        )
+        self.assertNotIn("unsupported_request_grammar", grounded.clarification.reasons)
+        self.assertIn("device", grounded.clarification.unresolved_slots)
+        resolved = resolve_clarification_submission(
+            grounded,
+            answer="Set the Dining Room AC on the Ground Floor to 24 Celsius.",
+            confirmed_instruction=DomuxInstruction(
+                "set", "AC", "temperature", "24", "Celsius", "Dining Room", "Ground Floor"
+            ),
+            registry=registry,
+        )
+        self.assertEqual(resolved.chosen.entity_id, "climate.dining")
+
+        singleton = EntityRegistry((
+            EntitySpec("climate.study", "climate", "AC", "Study", "Ground Floor"),
+        ))
+        modified_attribute = ground_domux_request(
+            "Set the minimum temperature to 20 degrees.",
+            "set|AC|temperature|20|Celsius|*|*",
+            singleton,
+        )
+        self.assertIn("attribute", modified_attribute.clarification.unresolved_slots)
+        with self.assertRaisesRegex(GroundingError, "operation modifier"):
+            resolve_clarification_submission(
+                modified_attribute,
+                answer="The Study AC on the Ground Floor.",
+                confirmed_instruction=DomuxInstruction(
+                    "set", "AC", "temperature", "20", "Celsius", "Study", "Ground Floor"
+                ),
+                registry=singleton,
+            )
+        clarified_attribute = resolve_clarification_submission(
+            modified_attribute,
+            answer="Set the Study AC on the Ground Floor temperature to 20 Celsius.",
+            confirmed_instruction=DomuxInstruction(
+                "set", "AC", "temperature", "20", "Celsius", "Study", "Ground Floor"
+            ),
+            registry=singleton,
+        )
+        self.assertEqual(clarified_attribute.chosen.entity_id, "climate.study")
+
+        lights = EntityRegistry((
+            EntitySpec("light.hall", "light", "Light", "Hall", "Ground Floor"),
+            EntitySpec("light.kitchen", "light", "Light", "Kitchen", "Ground Floor"),
+            EntitySpec("light.bedroom", "light", "Light", "Bedroom", "First Floor"),
+        ))
+        middle = ground_domux_request(
+            "Turn the one in the middle off.",
+            "turnOff|Light|*|*|*|Bedroom|First Floor",
+            lights,
+            SessionContext(("light.hall", "light.kitchen", "light.bedroom")),
+        )
+        self.assertNotIn("unsupported_request_grammar", middle.clarification.reasons)
+        self.assertIn("context", middle.clarification.unresolved_slots)
+        self.assertEqual(
+            resolve_clarification_submission(
+                middle,
+                answer="I mean the Bedroom light on the First Floor.",
+                confirmed_instruction=DomuxInstruction(
+                    "turnOff", "Light", "*", "*", "*", "Bedroom", "First Floor"
+                ),
+                registry=lights,
+            ).chosen.entity_id,
+            "light.bedroom",
+        )
+
+    def test_negative_and_other_selector_phrases_never_direct_execute(self) -> None:
+        singleton = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        for direction, action in (("increase", "adjustUp"), ("decrease", "adjustDown")):
+            with self.subTest(direction=direction):
+                grounded = ground_domux_request(
+                    f"No need to {direction} the Study light brightness.",
+                    f"{action}|Light|brightness|*|*|Study|*",
+                    singleton,
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("negative_or_cancelled_intent", grounded.clarification.reasons)
+
+        climate_registry = EntityRegistry((
+            EntitySpec("climate.study", "climate", "AC", "Study", "Ground Floor"),
+        ))
+        excluded_values = (
+            (
+                singleton,
+                "Set the Study light color to no Blue.",
+                "set|Light|color|Blue|*|Study|*",
+                "value:blue",
+            ),
+            (
+                singleton,
+                "Set the Study light brightness to no 50 percent.",
+                "set|Light|brightness|50|Percent|Study|*",
+                "number:50",
+            ),
+            (
+                climate_registry,
+                "Set the Study AC to no Cool mode.",
+                "set|AC|mode|Cool|*|Study|*",
+                "value:cool",
+            ),
+            (
+                climate_registry,
+                "Set the Study AC fan speed to no High level.",
+                "set|AC|fan speed|High|Level|Study|*",
+                "value:high",
+            ),
+            (
+                climate_registry,
+                "Set the Study AC temperature to no 20 degrees.",
+                "set|AC|temperature|20|Celsius|Study|*",
+                "number:20",
+            ),
+        )
+        for value_registry, utterance, raw_output, token in excluded_values:
+            with self.subTest(excluded_value=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    raw_output,
+                    value_registry,
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("value", grounded.clarification.unresolved_slots)
+                self.assertIn(token, grounded.excluded_operation_value_tokens)
+
+        two_lights = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("light.living", "light", "Light", "Living Room", "Ground Floor"),
+        ))
+        excluded = ground_domux_request(
+            "Turn off a light, no Study light.",
+            "turnOff|Light|*|*|*|*|*",
+            two_lights,
+        )
+        self.assertTrue(excluded.clarification.required)
+        self.assertIn("light.study", excluded.negated_entity_ids)
+
+        contrastive = ground_domux_request(
+            "Turn off not the Study light but the Living Room light.",
+            "turnOff|Light|*|*|*|Living Room|Ground Floor",
+            two_lights,
+        )
+        self.assertEqual(contrastive.negated_entity_ids, ("light.study",))
+        resolved_contrastive = resolve_clarification_submission(
+            contrastive,
+            answer="Not the Study light; use the Living Room light.",
+            confirmed_instruction=DomuxInstruction(
+                "turnOff", "Light", "*", "*", "*", "Living Room", "Ground Floor"
+            ),
+            registry=two_lights,
+        )
+        self.assertEqual(resolved_contrastive.chosen.entity_id, "light.living")
+
+        named_singleton = EntityRegistry((
+            EntitySpec(
+                "light.ceiling", "light", "Ceiling Light", "Study", "Ground Floor"
+            ),
+        ))
+        other = ground_domux_request(
+            "Turn other Ceiling Light off.",
+            "turnOff|Ceiling Light|*|*|*|*|*",
+            named_singleton,
+        )
+        self.assertTrue(other.clarification.required)
+        self.assertIn("other_reference_requires_selection", other.clarification.reasons)
+
+        for device in ("Lights", "Lamps", "Devices", "ACs"):
+            with self.subTest(other_device=device):
+                plural_registry = EntityRegistry((
+                    EntitySpec(
+                        f"light.{device.casefold()}",
+                        "light",
+                        device,
+                        "Study",
+                        "Ground Floor",
+                    ),
+                ))
+                plural_other = ground_domux_request(
+                    f"Turn other {device.casefold()} off.",
+                    f"turnOff|{device}|*|*|*|*|*",
+                    plural_registry,
+                )
+                self.assertTrue(plural_other.clarification.required)
+                self.assertIn(
+                    "other_reference_requires_selection",
+                    plural_other.clarification.reasons,
+                )
+
+        for utterance in (
+            "Turn off a light, but not the light—Study light.",
+            "Turn off a light, but not the light that you and I talked about in Study.",
+            "Turn off no light.",
+        ):
+            with self.subTest(unresolved_exclusion=utterance):
+                unresolved_exclusion = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    two_lights,
+                )
+                self.assertTrue(unresolved_exclusion.clarification.required)
+                self.assertIn(
+                    "unsupported_request_grammar",
+                    unresolved_exclusion.clarification.reasons,
+                )
+                with self.assertRaisesRegex(GroundingError, "new immediate command"):
+                    resolve_clarification_submission(
+                        unresolved_exclusion,
+                        answer="Yes.",
+                        confirmed_instruction=DomuxInstruction(
+                            "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+                        ),
+                        registry=two_lights,
+                    )
+
+    def test_unanchored_inventory_words_never_fall_back_to_a_global_singleton(self) -> None:
+        registry = EntityRegistry((
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+            EntitySpec("cover.kitchen", "cover", "Curtain", "Kitchen", "Ground Floor"),
+        ))
+        utterances = (
+            "Turn off the light for Kitchen.",
+            "For Kitchen, turn off the light.",
+            "Turn off the light of Kitchen.",
+            "Turn off the light by Kitchen.",
+            "Turn off the light about Kitchen.",
+            "Turn off the light around Kitchen.",
+        )
+        for utterance in utterances:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    registry,
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("room", grounded.clarification.unresolved_slots)
+
+    def test_command_vocabulary_metadata_collisions_require_explicit_selector_syntax(self) -> None:
+        collision_registry = EntityRegistry((
+            EntitySpec(
+                "light.brightness",
+                "light",
+                "Brightness",
+                "The",
+                "First",
+                ("Mode",),
+            ),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        cases = (
+            (
+                "Set the light brightness to 50 percent.",
+                "set|Light|brightness|50|Percent|*|*",
+            ),
+            ("Turn the light off.", "turnOff|Light|*|*|*|*|*"),
+            ("First, turn the light off.", "turnOff|Light|*|*|*|*|*"),
+        )
+        for utterance, raw_output in cases:
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    raw_output,
+                    collision_registry,
+                )
+                self.assertTrue(grounded.clarification.required)
+
+        explicit = ground_domux_request(
+            "Set the device named Brightness in the room named The to 50 percent brightness.",
+            "set|Brightness|brightness|50|Percent|The|*",
+            collision_registry,
+        )
+        self.assertTrue(explicit.clarification.required)
+        self.assertEqual(
+            tuple(entity.entity_id for entity in explicit.candidates),
+            ("light.brightness",),
+        )
+
+        affirmative_aliases = EntityRegistry((
+            EntitySpec(
+                "light.living",
+                "light",
+                "Light",
+                "Living Room",
+                "Ground Floor",
+                ("Yes", "Proceed"),
+            ),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        ambiguous = ground_domux_request(
+            "Turn off the light.",
+            "turnOff|Light|*|*|*|*|*",
+            affirmative_aliases,
+        )
+        self.assertEqual(len(ambiguous.candidates), 2)
+        for answer in ("Yes.", "Proceed."):
+            with self.subTest(answer=answer), self.assertRaisesRegex(
+                GroundingError, "does not select"
+            ):
+                resolve_clarification_submission(
+                    ambiguous,
+                    answer=answer,
+                    confirmed_instruction=DomuxInstruction(
+                        "turnOff", "Light", "*", "*", "*", "Living Room", "Ground Floor"
+                    ),
+                    registry=affirmative_aliases,
+                )
+
+        ordinal_registry = EntityRegistry((
+            EntitySpec("light.first", "light", "Light", "First", "Ground Floor"),
+            EntitySpec("light.study", "light", "Light", "Study", "Ground Floor"),
+        ))
+        for utterance in (
+            "First, turn the light off.",
+            "First: turn the light off.",
+            "Turn the first light off.",
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(
+                    utterance,
+                    "turnOff|Light|*|*|*|*|*",
+                    ordinal_registry,
+                )
+                self.assertTrue(grounded.clarification.required)
+                self.assertIn("room", grounded.clarification.unresolved_slots)
+
+    def test_questions_wait_prefixes_and_action_alternatives_never_execute(self) -> None:
+        raw = "turnOff|Light|*|*|*|Study|Ground Floor"
+        for utterance in (
+            "Do you want to turn off the Study light?",
+            "Do I turn off the Study light?",
+            "Did you turn off the Study light?",
+            "Do we turn off the Study light?",
+            "Did we turn off the Study light?",
+            "Can we turn off the Study light?",
+            "Could we turn off the Study light?",
+            "Would we turn off the Study light?",
+            "Should we turn off the Study light?",
+            "Do you need to turn off the Study light?",
+            "Do you have to turn off the Study light?",
+            "Would you want to turn off the Study light?",
+            "Can you mean to turn off the Study light?",
+            "We did turn off the Study light.",
+            "I did turn off the Study light.",
+            "You did turn off the Study light.",
+            "We do turn off the Study light.",
+            "I do turn off the Study light.",
+            "You do turn off the Study light.",
+        ):
+            with self.subTest(utterance=utterance):
+                grounded = ground_domux_request(utterance, raw, self.registry)
+                self.assertIn("informational_request", grounded.clarification.reasons)
+
+        # These conventional second-person modal forms remain supported as
+        # polite imperatives; adding a meta verb above changes them to a query.
+        for utterance in (
+            "Can you turn off the Study light?",
+            "Could you turn off the Study light?",
+            "Would you turn off the Study light?",
+        ):
+            with self.subTest(polite_imperative=utterance):
+                grounded = ground_domux_request(utterance, raw, self.registry)
+                self.assertNotIn("informational_request", grounded.clarification.reasons)
+
+        waited = ground_domux_request(
+            "Wait, then turn off the Study light.",
+            raw,
+            self.registry,
+        )
+        self.assertIn("unsupported_condition_or_time", waited.clarification.reasons)
+
+        for utterance in (
+            "From now on, turn the Study light off.",
+            "Now and then, turn the Study light off.",
+        ):
+            with self.subTest(persistent_or_periodic=utterance):
+                grounded = ground_domux_request(utterance, raw, self.registry)
+                self.assertIn(
+                    "unsupported_condition_or_time",
+                    grounded.clarification.reasons,
+                )
+
+        alternative = ground_domux_request(
+            "Turn the Study light on or off; confirm.",
+            raw,
+            self.registry,
+        )
+        self.assertIn("action", alternative.clarification.unresolved_slots)
+        with self.assertRaises(GroundingError):
+            resolve_clarification_submission(
+                alternative,
+                answer="Yes.",
+                confirmed_instruction=DomuxInstruction(
+                    "turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"
+                ),
+                registry=self.registry,
+            )
+
+    def test_model_selector_slots_cannot_launder_conditions_into_the_grammar(self) -> None:
+        modifiers = (
+            "subject to nobody being home",
+            "depending on whether anyone is home",
+            "so long as the room is empty",
+            "during dinner",
+            "upon arrival",
+            "at dusk",
+            "momentarily",
+            "as needed",
+        )
+        for modifier in modifiers:
+            utterance = f"Turn the Study light off {modifier}."
+            for slot in ("device", "room", "floor"):
+                fields = ["turnOff", "Light", "*", "*", "*", "Study", "Ground Floor"]
+                fields[{"device": 1, "room": 5, "floor": 6}[slot]] = modifier
+                with self.subTest(modifier=modifier, slot=slot):
+                    grounded = ground_domux_request(utterance, "|".join(fields), self.registry)
+                    self.assertTrue(grounded.clarification.required)
+                    self.assertTrue({
+                        "unsupported_condition_or_time", "unsupported_request_grammar",
+                    }.intersection(grounded.clarification.reasons))
+                    with self.assertRaises(GroundingError):
+                        resolve_clarification_submission(
+                            grounded,
+                            answer="The Study light on the Ground Floor.",
+                            confirmed_instruction=DomuxInstruction(
+                                "turnOff", "Ceiling Light", "*", "*", "*",
+                                "Study", "Ground Floor",
+                            ),
+                            registry=self.registry,
+                        )
+
+    def test_selector_slot_text_does_not_change_grammar_support(self) -> None:
+        utterance = "Turn the Study light off subject to nobody being home."
+        raw_outputs = (
+            "turnOff|Light|*|*|*|Study|Ground Floor",
+            "turnOff|subject to nobody being home|*|*|*|Study|Ground Floor",
+            "turnOff|Light|*|*|*|subject to nobody being home|Ground Floor",
+            "turnOff|Light|*|*|*|Study|subject to nobody being home",
+        )
+        reasons = []
+        for raw_output in raw_outputs:
+            grounded = ground_domux_request(utterance, raw_output, self.registry)
+            reasons.append("unsupported_request_grammar" in grounded.clarification.reasons)
+        self.assertEqual(reasons, [True, True, True, True])
+
+    def test_unique_resolution_rechecks_non_wildcard_room_and_floor(self) -> None:
+        grounded = ground_domux_request(
+            "Turn off the Study ceiling light on the Ground Floor.",
+            "turnOff|Ceiling Light|*|*|*|Study|Ground Floor",
+            self.registry,
+        )
+        self.assertFalse(grounded.clarification.required)
+        for slot, wrong in (("room", "Kitchen"), ("floor", "First Floor")):
+            source = replace(grounded.source_instructions[0], **{slot: wrong})
+            tampered = replace(grounded, source_instructions=(source,))
+            with self.subTest(slot=slot), self.assertRaisesRegex(
+                GroundingError, f"unique request {slot}"
+            ):
+                resolve_unique_request(tampered, self.registry)
+
+    def test_target_only_answer_cannot_repair_a_model_missed_operation(self) -> None:
+        context = SessionContext(("cover.study_curtain",))
+        grounded = ground_domux_request(
+            "Open that one to 60 percent.",
+            "set|Light|brightness|60|Percent|*|*",
+            self.registry,
+            context,
+        )
+        self.assertEqual(
+            tuple(entity.entity_id for entity in grounded.candidates),
+            ("cover.study_curtain",),
+        )
+        with self.assertRaisesRegex(GroundingError, "answer-supported patch"):
+            resolve_clarification_submission(
+                grounded,
+                answer="The Study curtain on the Ground Floor.",
+                confirmed_instruction=DomuxInstruction(
+                    "set", "Curtain", "position", "60", "Percent", "Study", "Ground Floor"
+                ),
+                registry=self.registry,
+            )
 
     def test_zero_and_ambiguous_answers_fail(self) -> None:
         candidates = self.registry.candidates(parse_domux_output("turnOff|Ceiling Light|*|*|*|*|*")[0])

@@ -41,16 +41,6 @@ GENERIC_DEVICE_ALIASES = {
     "air conditioner": "climate",
     "air conditioning": "climate",
 }
-GENERIC_REFERENCE_NOUN_RE = (
-    r"(?:one|ones|device|devices|light|lights|lighting|lamp|lamps|curtain|curtains|"
-    r"blind|blinds|shade|shades|cover|covers|ac|acs|air\s+conditioner|"
-    r"air\s+conditioners|room|rooms|floor|floors|level|levels)"
-)
-OTHER_REFERENCE_RE = (
-    rf"\b(?:the\s+other(?!\s+than\b)(?:\s+(?:[a-z0-9]+\s+){{0,3}}"
-    rf"{GENERIC_REFERENCE_NOUN_RE})?|other(?!\s+than\b)"
-    rf"(?:\s+[a-z0-9]+){{0,3}}\s+{GENERIC_REFERENCE_NOUN_RE})\b"
-)
 COLOR_RGB = {
     "blue": [0, 0, 255],
     "cyan": [0, 255, 255],
@@ -257,7 +247,7 @@ class EntityRegistry:
     @staticmethod
     def _device_matches(entity: EntitySpec, requested: str) -> bool:
         requested_norm = normalize_text(requested)
-        if requested_norm in {"*", "it", "that", "that one", "this", "this one"}:
+        if requested_norm in {"*", "it", "that", "that one", "the other", "other"}:
             return True
         names = {normalize_text(entity.device), *(normalize_text(alias) for alias in entity.aliases)}
         if requested_norm in names:
@@ -283,7 +273,7 @@ class EntityRegistry:
         ]
 
         requested = normalize_text(instruction.device)
-        if context and requested in {"*", "it", "that", "that one", "this", "this one"}:
+        if context and requested in {"*", "it", "that", "that one", "the other", "other"}:
             recent = set(context.recent_entity_ids)
             contextual = [entity for entity in candidates if entity.entity_id in recent]
             if contextual:
@@ -387,8 +377,7 @@ def _value_is_explicitly_excluded(text: str, value: str) -> bool:
         r"\b(?:other\s+than|except|besides|apart\s+from|avoid|without)\s+"
         r"(?:using\s+)?(?:the\s+)?|"
         r"\b(?:do\s+not|don't|dont|never)\s+(?:use|choose|select)\s+(?:the\s+)?|"
-        r"\bnot\s+(?:the\s+)?|"
-        r"\bno\s+(?:the\s+)?)"
+        r"\bnot\s+(?:the\s+)?)"
     )
     return re.search(
         rf"{prefix}{re.escape(token)}(?![a-z0-9])",
@@ -534,36 +523,12 @@ def _attribute_supported_for_entity(
     return False
 
 
-def _relative_adjust_directions(text: str) -> frozenset[str]:
-    """Return only relative directions explicitly authored by the user.
-
-    A bare ``adjust`` carries no direction.  Treating it as evidence for either
-    ``adjustUp`` or ``adjustDown`` would let a model choose a state transition
-    that the user never authorized.
-    """
-
-    normalized = normalize_text(text)
-    if _has_negated_direction(normalized):
-        return frozenset()
-    directions: set[str] = set()
-    if re.search(
-        r"\b(?:raise|increase)\b|"
-        r"\b(?:brighter|warmer|higher)\b(?!\s+(?:floor|level|mode)\b)",
-        normalized,
-    ):
-        directions.add("adjustup")
-    if re.search(
-        r"\blower\b(?!\s+(?:floor|level|mode)\b)|\bdecrease\b|"
-        r"\b(?:dimmer|cooler)\b(?!\s+(?:floor|level|mode)\b)",
-        normalized,
-    ):
-        directions.add("adjustdown")
-    return frozenset(directions)
-
-
 def _action_supported(text: str, instruction: DomuxInstruction) -> bool:
     normalized = normalize_text(text)
-    if _has_negative_action_authorization(normalized) or _has_negated_direction(normalized):
+    if re.search(
+        r"\b(?:do\s+not|don't|never)\s+(?:turn|switch|open|close|set|change|make|adjust|raise|lower)\b",
+        normalized,
+    ):
         return False
     action = normalize_text(instruction.action)
     directional = _directional_actions(normalized)
@@ -581,7 +546,9 @@ def _action_supported(text: str, instruction: DomuxInstruction) -> bool:
             "set", "change", "make", "move", "adjust", "open", "raise", "lower", "use", "confirm"
         ))
     if action in {"adjustup", "adjustdown"}:
-        return _relative_adjust_directions(normalized) == {action}
+        return any(_phrase_in(normalized, term) for term in (
+            "raise", "lower", "increase", "decrease", "brighter", "dimmer", "warmer", "cooler", "adjust"
+        ))
     return False
 
 
@@ -589,10 +556,6 @@ def _directional_actions(normalized_text: str) -> set[str]:
     """Extract action words without treating prepositions such as ``on Floor`` as actions."""
 
     result: set[str] = set()
-    if re.search(r"\bon\s+(?:or|and\s*/?\s*or)\s+off\b|\boff\s+(?:or|and\s*/?\s*or)\s+on\b", normalized_text):
-        result.update(("turnon", "turnoff"))
-    if re.search(r"\bopen\s+(?:or|and\s*/?\s*or)\s+close\b|\bclose\s+(?:or|and\s*/?\s*or)\s+open\b", normalized_text):
-        result.update(("turnon", "turnoff"))
     immediate = re.findall(r"\b(?:turn|switch)\s+(on|off)\b", normalized_text)
     result.update("turnon" if value == "on" else "turnoff" for value in immediate)
     # Support "switch that device off", but only when the direction ends the
@@ -641,11 +604,8 @@ def _unit_supported(text: str, instruction: DomuxInstruction) -> bool:
     return False
 
 
-def _distinct_named_matches(
-    text: str,
-    values: Iterable[str],
-) -> tuple[tuple[int, int, str], ...]:
-    """Return longest label matches while preserving occurrence provenance."""
+def _distinct_named_values(text: str, values: Iterable[str]) -> frozenset[str]:
+    """Return values with shorter matches removed only at overlapping spans."""
 
     normalized = normalize_text(text)
     matches: list[tuple[int, int, str]] = []
@@ -664,191 +624,7 @@ def _distinct_named_matches(
             for other in matches
         )
     ]
-    return tuple(sorted(kept))
-
-
-def _distinct_named_values(text: str, values: Iterable[str]) -> frozenset[str]:
-    """Return values with shorter matches removed only at overlapping spans."""
-
-    return frozenset(
-        value for _start, _end, value in _distinct_named_matches(text, values)
-    )
-
-
-def _selector_span_is_negative(normalized_text: str, start: int) -> bool:
-    """Return whether a selector occurrence is under a bounded negative scope."""
-
-    prefix = normalized_text[max(0, start - 120):start]
-    contrastive_boundaries = tuple(re.finditer(r"\b(?:but|rather)\b", prefix))
-    if contrastive_boundaries:
-        boundary = contrastive_boundaries[-1]
-        before = prefix[:boundary.start()]
-        if not re.search(r"\b(?:anything|everything|nothing)\s+$", before):
-            prefix = prefix[boundary.end():]
-    strong_negative = (
-        r"(?:do\s+not|don't|dont)\s+(?:use|select|choose|mean|touch|act\s+on)|"
-        r"(?:except|besides|other\s+than|anything\s+but|apart\s+from|"
-        r"instead\s+of|avoid|without)|no"
-    )
-    return bool(re.search(
-        rf"\b(?:{strong_negative})\b(?:\s+[a-z0-9]+){{0,10}}\s*$|"
-        rf"\bnot\b(?:\s+[a-z0-9]+){{0,8}}\s*$",
-        prefix,
-    ))
-
-
-def _positive_named_matches(
-    text: str,
-    values: Iterable[str],
-) -> tuple[tuple[int, int, str], ...]:
-    normalized = normalize_text(text)
-    return tuple(
-        match
-        for match in _distinct_named_matches(normalized, values)
-        if not _selector_span_is_negative(normalized, match[0])
-        and not (
-            re.search(r"\bleave\s+(?:the\s+)?$", normalized[:match[0]])
-            and re.match(
-                r"(?:\s+[a-z0-9]+){0,4}\s+(?:unchanged|as\s+is)\b",
-                normalized[match[1]:],
-            )
-        )
-    )
-
-
-def _label_is_grammar_collision(value: str) -> bool:
-    """Return whether a metadata label is also ordinary command language."""
-
-    words = re.findall(r"[a-z0-9]+", normalize_text(value))
-    if not words or all(word.isdigit() for word in words):
-        return True
-    command_words = {
-        "a", "about", "adjust", "an", "and", "any", "around", "at", "auto",
-        "before", "between", "brightness", "bright", "brighter", "by", "change",
-        "choose", "close", "color", "confirm", "cool", "cooler", "decrease",
-        "degree", "degrees", "device", "dimmer", "do", "dry", "fan", "fahrenheit",
-        "first", "for", "from", "halfway", "heat", "high", "in", "increase",
-        "it", "kelvin", "last", "left", "level", "light", "lighting", "low",
-        "lower", "make", "medium", "middle", "mode", "move", "next", "no", "not",
-        "now", "of", "off", "on", "one", "open", "openness", "or", "other",
-        "percent", "please", "position", "proceed", "raise", "right", "second",
-        "select", "set", "side", "speed", "switch", "temperature", "that", "the",
-        "third", "this", "to", "turn", "use", "value", "wait", "warmer", "white",
-        "wind", "with", "without", "yes", "you",
-        *{
-            word
-            for color in COLOR_RGB
-            for word in re.findall(r"[a-z0-9]+", normalize_text(color))
-        },
-    }
-    return all(word in command_words for word in words)
-
-
-def _selector_match_is_anchored(
-    normalized_text: str,
-    start: int,
-    end: int,
-    value: str,
-    category: str,
-    registry: EntityRegistry,
-    *,
-    allow_topic: bool = True,
-) -> bool:
-    """Require inventory words to occur in a target-selector position."""
-
-    if category in {"domain", "entity"}:
-        return True
-    prefix = normalized_text[:start]
-    suffix = normalized_text[end:]
-    device_labels = {
-        *GENERIC_DEVICE_ALIASES,
-        *(normalize_text(entity.device) for entity in registry.entities),
-    }
-    device_pattern = "|".join(
-        re.escape(label) for label in sorted(device_labels, key=len, reverse=True)
-    )
-    locative_before = bool(re.search(
-        r"\b(?:in|inside|at|on|from)\s+(?:the\s+)?$",
-        prefix,
-    ))
-    device_after = bool(re.match(
-        rf"\s+(?:(?:or|and)\s+(?:the\s+)?(?:[a-z0-9]+\s+){{0,3}})?"
-        rf"(?:{device_pattern})(?![a-z0-9])",
-        suffix,
-    ))
-    explicit_slot = bool(re.search(
-        r"\b(?:room|floor|level|device)\s+(?:named\s+|called\s+)?$|"
-        r"\b(?:in|on)\s+the\s+(?:room|floor|level)\s+$",
-        prefix,
-    )) or bool(re.match(r"\s+(?:room|floor|level|device)\b", suffix))
-    topic_before_command = not re.search(
-        r"\bfor\s+(?:the\s+)?$",
-        prefix,
-    ) and bool(re.match(
-        r"\s*[,;:]\s*(?:please\s+)?(?:turn|switch|open|close|set|change|"
-        r"make|adjust|raise|lower|increase|decrease|move|use|select|choose)\b",
-        suffix,
-    ))
-    if category != "domain" and _label_is_grammar_collision(value):
-        return locative_before or explicit_slot
-    value_words = set(re.findall(r"[a-z0-9]+", value))
-    if category == "room":
-        if value_words.intersection({"room"}):
-            return True
-        if value in {
-            "any", "first", "second", "third", "last", "middle", "next", "one",
-            "right", "now", "please", "light", "that", "this", "other", "it",
-        }:
-            return locative_before or explicit_slot
-        return (
-            locative_before or device_after or explicit_slot
-            or (allow_topic and topic_before_command)
-        )
-    if category == "floor":
-        if value_words.intersection({"floor", "level", "storey", "story"}):
-            return True
-        return (
-            locative_before or device_after or explicit_slot
-            or (allow_topic and topic_before_command)
-        )
-
-    # Specific device names containing a device noun are self-anchoring.
-    if any(_phrase_in(value, label) for label in GENERIC_DEVICE_ALIASES):
-        return True
-    command_before = bool(re.search(
-        r"\b(?:turn|switch|open|close|set|change|make|adjust|raise|lower|"
-        r"increase|decrease|use|select|choose|mean)\b(?:\s+(?:on|off))?"
-        r"(?:\s+(?:the|that|this|my))?\s+$|"
-        r"\b(?:the|that|this|my)\s+$",
-        prefix,
-    ))
-    operation_after = bool(re.match(
-        r"\s+(?:on|off|open|closed|to|by)(?:\b|$)",
-        suffix,
-    ))
-    return command_before or operation_after or locative_before or explicit_slot
-
-
-def _selector_label_evidence(
-    text: str,
-    label: str,
-    category: str,
-    registry: EntityRegistry,
-) -> bool:
-    """Recognize a label in a clarification without protocol-word collisions."""
-
-    normalized = normalize_text(text)
-    matches = _positive_named_matches(normalized, (label,))
-    if not matches:
-        return False
-    if not _label_is_grammar_collision(label):
-        return True
-    return any(
-        _selector_match_is_anchored(
-            normalized, start, end, value, category, registry,
-        )
-        for start, end, value in matches
-    )
+    return frozenset(value for _start, _end, value in kept)
 
 
 def _targeted_named_values(text: str, values: Iterable[str]) -> frozenset[str]:
@@ -1081,275 +857,20 @@ def _operational_conflicts(text: str, instruction: DomuxInstruction) -> frozense
     return frozenset(conflicts)
 
 
-def _source_selector(
-    utterance: str,
-    instruction: DomuxInstruction,
-    registry: EntityRegistry,
-) -> DomuxInstruction:
+def _source_selector(utterance: str, instruction: DomuxInstruction) -> DomuxInstruction:
     """Erase model-proposed grounding fields that the user's words do not support."""
 
     normalized = normalize_text(utterance)
     fields = {slot: getattr(instruction, slot) for slot in SLOTS}
-
-    device_is_registered = any(
-        EntityRegistry._device_matches(entity, instruction.device)
-        for entity in registry.entities
-    )
-    room_is_registered = instruction.room == "*" or any(
-        normalize_text(entity.room) == normalize_text(instruction.room)
-        for entity in registry.entities
-    )
-    floor_is_registered = instruction.floor == "*" or any(
-        normalize_text(entity.floor) == normalize_text(instruction.floor)
-        for entity in registry.entities
-    )
-    if not _phrase_in(normalized, instruction.device) or not device_is_registered:
+    if not _phrase_in(normalized, instruction.device):
         fields["device"] = "*"
-    if not _phrase_in(normalized, instruction.room) or not room_is_registered:
+    if not _phrase_in(normalized, instruction.room):
         fields["room"] = "*"
-    if not _phrase_in(normalized, instruction.floor) or not floor_is_registered:
+    if not _phrase_in(normalized, instruction.floor):
         fields["floor"] = "*"
     if not _attribute_supported(utterance, instruction):
         fields["attribute"] = "*"
     return DomuxInstruction(**fields)
-
-
-def _partial_registry_selector_slots(
-    utterance: str,
-    registry: EntityRegistry,
-) -> tuple[str, ...]:
-    """Find incomplete multi-token registry labels in the user's own text.
-
-    Token overlap is useful for recognizing that a selector is present, but it
-    is not enough to authorize a canonical room, floor, or device.  For
-    example, ``dining light`` must not silently become ``Dining Room``.  The
-    slot remains repairable through clarification instead of being guessed.
-    """
-
-    normalized = normalize_text(utterance)
-    ignored = {
-        "ac", "air", "conditioner", "conditioning", "device", "room", "floor",
-        "level", "light", "lamp", "curtain", "blind", "shade",
-        "auto", "cool", "dry", "fan", "heat", "high", "low", "medium",
-        *COLOR_RGB,
-    }
-    labels: dict[str, set[str]] = {
-        "device": {entity.device for entity in registry.entities},
-        "room": {entity.room for entity in registry.entities},
-        "floor": {entity.floor for entity in registry.entities},
-    }
-    full_spans: list[tuple[int, int]] = []
-    for value in {value for values in labels.values() for value in values}:
-        value_norm = normalize_text(value)
-        full_spans.extend(
-            (match.start(), match.end())
-            for match in re.finditer(
-                rf"(?<![a-z0-9]){re.escape(value_norm)}(?![a-z0-9])",
-                normalized,
-            )
-        )
-    unresolved: list[str] = []
-    for slot, values in labels.items():
-        for value in values:
-            value_norm = normalize_text(value)
-            words = [
-                word for word in re.findall(r"[a-z0-9]+", value_norm)
-                if word not in ignored and not word.isdigit()
-            ]
-            if len(re.findall(r"[a-z0-9]+", value_norm)) < 2 or not words:
-                continue
-            for word in words:
-                word_matches = re.finditer(
-                    rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])",
-                    normalized,
-                )
-                if any(
-                    not any(start <= match.start() and match.end() <= end for start, end in full_spans)
-                    and _selector_match_is_anchored(
-                        normalized,
-                        match.start(),
-                        match.end(),
-                        word,
-                        slot,
-                        registry,
-                        allow_topic=False,
-                    )
-                    for match in word_matches
-                ):
-                    unresolved.append(slot)
-                    break
-            if slot in unresolved:
-                break
-    return tuple(dict.fromkeys(unresolved))
-
-
-def _unanchored_registry_selector_slots(
-    utterance: str,
-    registry: EntityRegistry,
-) -> tuple[str, ...]:
-    """Keep recognized-but-unparsed inventory words from being discarded.
-
-    A registered label in ``in Study`` or ``Study light`` is a positive
-    selector; one in a bounded negative scope is an exclusion.  Any remaining
-    occurrence (for example ``for Reading`` or a room named ``Right`` in
-    ``right now``) is semantically ambiguous and must force clarification
-    instead of falling back to a globally unique device.
-    """
-
-    labels: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-        ("room", "room", tuple(entity.room for entity in registry.entities)),
-        ("floor", "floor", tuple(entity.floor for entity in registry.entities)),
-        ("device", "device", tuple(
-            entity.device
-            for entity in registry.entities
-            if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES
-        )),
-        ("alias", "entity", tuple(
-            alias for entity in registry.entities for alias in entity.aliases
-        )),
-        ("entity", "entity", tuple(entity.entity_id for entity in registry.entities)),
-    )
-    unresolved: list[str] = []
-    normalized = normalize_text(utterance)
-    occurrences = tuple(
-        (start, end, value, category, slot)
-        for category, slot, values in labels
-        for start, end, value in _positive_named_matches(normalized, values)
-    )
-    anchored_spans = tuple(
-        (start, end)
-        for start, end, value, category, _slot in occurrences
-        if _selector_match_is_anchored(
-            normalized, start, end, value, category, registry,
-        )
-    )
-    for start, end, value, category, slot in occurrences:
-        if _selector_match_is_anchored(
-            normalized, start, end, value, category, registry,
-        ):
-            continue
-        if any(
-            outer_start <= start and end <= outer_end
-            and (outer_start, outer_end) != (start, end)
-            for outer_start, outer_end in anchored_spans
-        ):
-            continue
-        unresolved.append(slot)
-    return tuple(dict.fromkeys(unresolved))
-
-
-def _positional_unknown_selector_words(
-    utterance: str,
-    registry: EntityRegistry,
-) -> frozenset[str]:
-    """Allow one user-authored noncanonical selector token in a target position.
-
-    The token is still marked unresolved by the caller, so it can lead only to
-    clarification.  This preserves inputs such as ``upstairs AC`` and
-    ``downstairs temperature`` without letting arbitrary model slot text
-    expand the executable grammar.
-    """
-
-    normalized = normalize_text(utterance)
-    known_words: set[str] = set()
-    for entity in registry.entities:
-        for label in (
-            entity.entity_id, entity.room, entity.floor, entity.device, *entity.aliases,
-        ):
-            known_words.update(re.findall(r"[a-z0-9]+", normalize_text(label)))
-    for alias in GENERIC_DEVICE_ALIASES:
-        known_words.update(re.findall(r"[a-z0-9]+", normalize_text(alias)))
-    reserved = {
-        "a", "an", "and", "at", "change", "close", "confirm", "decrease", "do",
-        "increase", "it", "lower", "make", "move", "not", "open", "other",
-        "please", "raise", "set", "switch", "that", "the", "this", "to", "turn",
-        # Operation values, modifiers, and units can naturally precede an
-        # attribute noun (``Cool mode``, ``40 percent brightness``).  They are
-        # not positional selectors.
-        "auto", "bright", "brighter", "celsius", "color", "cool", "cooler", "degree",
-        "degrees", "dimmer", "dry", "fan", "fahrenheit", "halfway", "heat",
-        "high", "kelvin", "low", "medium", "percent", "warmer", "white",
-        *{
-            word
-            for color in COLOR_RGB
-            for word in re.findall(r"[a-z0-9]+", normalize_text(color))
-        },
-    }
-    target_nouns = sorted(
-        {
-            *(normalize_text(alias) for alias in GENERIC_DEVICE_ALIASES),
-            "brightness",
-            "color",
-            "mode",
-            "openness",
-            "position",
-            "temperature",
-        },
-        key=len,
-        reverse=True,
-    )
-    unknown: set[str] = set()
-    for noun in target_nouns:
-        for match in re.finditer(
-            rf"(?<![a-z0-9]){re.escape(noun)}(?![a-z0-9])",
-            normalized,
-        ):
-            prefix = normalized[:match.start()]
-            preceding = re.search(r"([a-z0-9]+)\s*$", prefix)
-            if preceding is None:
-                continue
-            word = preceding.group(1)
-            if noun == "mode" and re.search(
-                rf"\bto\s+{re.escape(word)}\s*$",
-                prefix,
-            ):
-                continue
-            if word not in known_words and word not in reserved and not word.isdigit():
-                unknown.add(word)
-    return frozenset(unknown)
-
-
-def _positional_unknown_attribute_words(
-    utterance: str,
-    registry: EntityRegistry,
-) -> frozenset[str]:
-    """Return unknown positional words immediately modifying an operation slot."""
-
-    normalized = normalize_text(utterance)
-    unknown = _positional_unknown_selector_words(utterance, registry)
-    attribute_noun = r"(?:brightness|color|mode|openness|position|temperature)"
-    return frozenset(
-        word for word in unknown
-        if re.search(
-            rf"(?<![a-z0-9]){re.escape(word)}\s+{attribute_noun}(?![a-z0-9])",
-            normalized,
-        )
-    )
-
-
-def _unresolved_selector_phrase_slots(utterance: str) -> tuple[str, ...]:
-    """Detect relational location phrases that do not name registry metadata."""
-
-    normalized = normalize_text(utterance)
-    qualifiers = (
-        r"(?:my|your|our|their|his|her|this|that|one|other|right|left|current|"
-        r"same|nearby|any|some|another|a|an)"
-    )
-    unresolved: list[str] = []
-    if re.search(
-        rf"\b(?:in|inside|at|from|for)\s+(?:the\s+)?{qualifiers}\s+room\b",
-        normalized,
-    ):
-        unresolved.append("room")
-    if re.search(
-        rf"\b(?:in|inside|at|on|from|for)\s+(?:the\s+)?{qualifiers}\s+"
-        rf"(?:floor|level|storey|story)\b",
-        normalized,
-    ):
-        unresolved.append("floor")
-    if re.search(r"\bin\s+the\s+middle\b", normalized):
-        unresolved.extend(("room", "context"))
-    return tuple(unresolved)
 
 
 def _missing_required_slots(instruction: DomuxInstruction) -> tuple[str, ...]:
@@ -1379,7 +900,7 @@ def _has_negative_action_authorization(text: str) -> bool:
 
     normalized = normalize_text(text)
     action = (
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|decrease|execute|"
+        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|execute|"
         r"proceed|act|go\s+ahead|do\s+it|touch|confirm|authorize|approve|dispatch)"
     )
     bridge = r"(?:(?:you|me|us|i|we|to|need|want|let|allow|please|just)\s+){0,8}"
@@ -1395,43 +916,17 @@ def _has_negative_action_authorization(text: str) -> bool:
     ))
 
 
-def _has_negated_direction(text: str) -> bool:
-    """Reject a relative direction appearing under an explicit negative scope."""
-
-    normalized = normalize_text(text)
-    direction = (
-        r"(?:raise|increase|raising|increasing|brighter|warmer|higher|"
-        r"lower|decrease|lowering|decreasing|dimmer|cooler)"
-    )
-    bridge = r"(?:(?:make|move|adjust|set|turn)\s+)?(?:(?:it|that|this|the\s+\w+)\s+)?"
-    qualifier = r"(?:(?:any|even|more|less|at\s+all)\s+){0,3}"
-    return bool(re.search(
-        rf"\b(?:do\s+not|don't|dont|never(?:\s+ever)?|no(?:\s+more)?|not|"
-        rf"anything\s+but|other\s+than|besides|apart\s+from)\s+"
-        rf"{bridge}{qualifier}{direction}\b|"
-        rf"\b(?:avoid|without)\s+(?:making\s+(?:it|that|this)\s+)?{direction}\b|"
-        rf"\bno\s+need\s+(?:to|for)\b.{{0,48}}\b{direction}\b",
-        normalized,
-    ))
-
-
 def _has_negative_or_cancelled_intent(utterance: str) -> bool:
     normalized = normalize_text(utterance)
-    negative_imperative = (
-        _has_negative_action_authorization(normalized)
-        or _has_negated_direction(normalized)
-        or bool(re.search(
+    negative_imperative = _has_negative_action_authorization(normalized) or bool(re.search(
         r"\b(?:do\s+not|don't|dont|never(?:\s+ever)?)\s+"
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|decrease)\b",
+        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower)\b",
         normalized,
-        ))
-    )
+    ))
     withdrawn_request = bool(re.search(
-        r"\b(?:i\s+)?(?:do\s+not|don't|dont)\s+(?:want|need)\b.{0,48}\b"
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|"
-        r"decrease|brighter|dimmer|warmer|cooler|higher)\b|"
-        r"\bno\s+need\s+to\s+(?:turn|switch|open|close|set|change|make|adjust|raise|lower|"
-        r"increase|decrease)\b|"
+        r"\b(?:i\s+)?(?:do\s+not|don't)\s+(?:want|need)\b.{0,48}\b"
+        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower)\b|"
+        r"\bno\s+need\s+to\s+(?:turn|switch|open|close|set|change|make|adjust|raise|lower)\b|"
         r"\b(?:refrain\s+from|avoid)\s+(?:turning|switching|opening|closing|setting|"
         r"changing|making|adjusting|raising|lowering)\b|"
         r"\bwithout\s+(?:turning|switching|opening|closing|setting|changing|making|"
@@ -1473,20 +968,17 @@ def _has_unsupported_condition_or_time(utterance: str) -> bool:
         r"few|couple(?:\s+of)?|\d+(?:\.\d+)?)"
     )
     return bool(re.search(
-        r"^\s*wait\b|"
         r"\b(?:if|unless|when|whenever|once|while|after|before|until|provided|providing|assuming)\b|"
-        r"\b(?:as\s+long\s+as|so\s+long\s+as|in\s+case|depending\s+on|subject\s+to)\b|"
+        r"\b(?:as\s+long\s+as|in\s+case)\b|"
         r"\bas\s+soon\s+as\b|"
-        r"\b(?:during|upon\s+arrival|at\s+dusk|at\s+dawn|as\s+needed|momentarily)\b|"
         r"\b(?:tomorrow|tonight|later|today|noon|midnight|sunrise|sunset|"
         r"morning|afternoon|evening)\b|"
-        r"\b(?:for\s+now|from\s+now\s+on|now\s+and\s+then)\b|"
         r"\b(?:this|next)\s+(?:morning|afternoon|evening|night|week|month|year)\b|"
         r"\bon\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
         r"weekday|weekend)\b|"
         r"\b(?:every|each)\s+(?:morning|afternoon|evening|night|day|week|month|"
         r"weekday|weekend)\b|"
-        r"\b(?:daily|nightly|weekly|monthly|briefly|temporarily|momentarily|schedule|scheduled)\b|"
+        r"\b(?:daily|nightly|weekly|monthly|briefly|temporarily|schedule|scheduled)\b|"
         rf"\b(?:in|for)\s+{number_word}\s+(?:seconds?|minutes?|hours?|days?|weeks?)\b|"
         r"\b(?:in|for)\s+(?:half|a\s+half|quarter|a\s+quarter)\s+"
         r"(?:of\s+)?(?:an?\s+)?(?:hour|day)\b|"
@@ -1505,15 +997,6 @@ def _has_informational_request(utterance: str) -> bool:
     normalized = re.sub(r"^[^a-z0-9]+", "", normalize_text(utterance))
     return bool(re.match(
         r"^(?:(?:should|would|could|can|may)\s+i\b|"
-        r"(?:i|we|you)\s+(?:do|did)\s+(?:please\s+)?"
-        r"(?:turn|switch|open|close|set|change|make|adjust|raise|lower|increase|decrease)\b|"
-        r"(?:do|did|have|has)\s+(?:you|we)\s+(?:want|need|have|mean|intend|plan|"
-        r"expect|already|ever|turn|turned|switch|switched|open|opened|close|closed|"
-        r"set|change|changed|make|made|adjust|adjusted)\b|"
-        r"(?:should|would|could|can|may|will)\s+we\b|"
-        r"(?:should|would|could|can|may|will)\s+you\s+"
-        r"(?:want|need|have|mean|intend|plan|expect)\b|"
-        r"do\s+i\s+(?:turn|switch|open|close|set|change|make|adjust)\b|"
         r"(?:would|could)\s+it\s+be\s+(?:safe|okay|ok|wise|advisable)\b|"
         r"is\s+it\s+(?:safe|okay|ok|wise|advisable)\b|"
         r"do\s+you\s+(?:recommend|suggest|think)\b|"
@@ -1566,7 +1049,6 @@ def _has_supported_request_grammar(
             normalized_utterance,
         )
     }
-    positional_selector_words = _positional_unknown_selector_words(utterance, registry)
 
     request_words = {
         # Immediate command and clarification-protocol framing.
@@ -1582,18 +1064,18 @@ def _has_supported_request_grammar(
         "temperature", "warm", "warmer", "white", "wind", "yellow",
         # Selector and polite-command glue.  These words carry no operation by
         # themselves; the source-to-slot checks still require positive evidence.
-        "about", "ac", "air", "am", "and", "around", "at",
+        "about", "ac", "air", "am", "and", "around", "at", "balcony", "bedroom",
         "any", "anything", "apart", "besides", "but", "by", "can", "conditioner",
-        "could", "curtain", "device",
+        "could", "curtain", "device", "downstairs", "east",
         "floor", "for", "from", "have", "i", "in", "instead", "it", "its", "just",
-        "light", "me", "my", "no", "not", "now", "of",
-        "middle", "one", "or", "other", "perhaps", "please", "right", "room", "side",
+        "lab", "light", "main", "me", "middle", "my", "no", "not", "now", "of",
+        "office", "one", "or", "other", "perhaps", "please", "reading", "right", "room",
         "something", "than",
-        "sure", "talked", "that", "the", "this", "to",
-        "use", "we", "which", "would", "you",
+        "side", "studio", "sure", "talked", "that", "the", "this", "to", "upstairs",
+        "use", "we", "west", "which", "would", "you",
         *{word for color in COLOR_RGB for word in normalize_text(color).split()},
     }
-    allowed = selector_words | request_words | source_mode_words | positional_selector_words
+    allowed = selector_words | request_words | source_mode_words
     normalized = normalized_utterance.replace("don't", "do not").replace("dont", "do not")
     words = re.findall(r"[a-z0-9]+", normalized)
     return all(
@@ -1606,25 +1088,14 @@ def _has_unresolved_generic_exclusion(text: str) -> bool:
     """Reject deictic exclusions that do not identify a stable entity ID."""
 
     return bool(re.search(
-        rf"\b(?:not|no)\s+(?:(?:this|that|the)\s+)?{GENERIC_REFERENCE_NOUN_RE}\b|"
+        r"\bnot\s+(?:(?:this|that|the)\s+)?(?:one|device)\b|"
         r"\bnot\s+(?:this|that)\b|"
-        rf"\b(?:leave|keep)\s+(?:(?:this|that|the)\s+)?{GENERIC_REFERENCE_NOUN_RE}\s+"
+        r"\b(?:leave|keep)\s+(?:(?:this|that|the)\s+)?(?:one|device)\s+"
         r"(?:unchanged|as\s+is)\b|"
-        rf"\b(?:use|select|choose|mean)\s+{OTHER_REFERENCE_RE}",
+        r"\b(?:use|select|choose|mean)\s+(?:the\s+)?other\s+"
+        r"(?:one|device|light|lamp|curtain|blind|shade|ac|air\s+conditioner)\b",
         normalize_text(text),
     ))
-
-
-def _excluded_generic_domains(text: str) -> frozenset[str]:
-    labels = {
-        "light": ("light", "lights", "lighting", "lamp", "lamps"),
-        "cover": ("curtain", "curtains", "blind", "blinds", "shade", "shades"),
-        "climate": ("ac", "acs", "air conditioner", "air conditioners"),
-    }
-    return frozenset(
-        domain for domain, names in labels.items()
-        if any(_label_is_excluded(text, name) for name in names)
-    )
 
 
 def _explicit_operational_requirements(utterance: str) -> frozenset[str]:
@@ -1682,16 +1153,11 @@ def _label_is_excluded(text: str, label: str) -> bool:
     normalized_label = normalize_text(label)
     if not normalized_label:
         return False
-    normalized = normalize_text(text)
-    explicitly_scoped = any(
-        _selector_span_is_negative(normalized, start)
-        for start, _end, _value in _distinct_named_matches(normalized, (normalized_label,))
-    )
-    return explicitly_scoped or bool(re.search(
+    return bool(re.search(
         rf"\b(?:not(?:\s+in)?|except|besides|other\s+than|anything\s+but|"
         rf"apart\s+from|instead\s+of)\s+(?:the\s+)?{re.escape(normalized_label)}\b|"
         rf"\bleave\s+(?:the\s+)?{re.escape(normalized_label)}\b.*\bunchanged\b",
-        normalized,
+        normalize_text(text),
     ))
 
 
@@ -1848,210 +1314,56 @@ def _mentioned_entities(
     return tuple(mentioned)
 
 
-@dataclass(frozen=True)
-class _ExplicitSelectorMatch:
-    present: bool
-    discriminating: bool
-    candidates: tuple[EntitySpec, ...]
-    slots: tuple[str, ...]
-    conflicting_slots: tuple[str, ...]
-
-
-def _explicit_selector_match(
-    registry: EntityRegistry,
-    utterance: str,
-    *,
-    allow_bare_meaningful: bool = False,
-) -> _ExplicitSelectorMatch:
-    """Bind user-authored inventory selectors independently of model output.
-
-    Values are ORed within a slot (``Study or Living Room``) and ANDed across
-    slots (``Kitchen light``).  A present selector with zero matches remains an
-    explicit contradiction; callers must never fall back to model/global
-    candidates in that case.
-    """
-
-    normalized = normalize_text(utterance)
-    labels: dict[str, tuple[str, ...]] = {
-        "domain": tuple(GENERIC_DEVICE_ALIASES),
-        "room": tuple(entity.room for entity in registry.entities),
-        "floor": tuple(entity.floor for entity in registry.entities),
-        "device": tuple(
-            entity.device
-            for entity in registry.entities
-            if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES
-        ),
-        "alias": tuple(alias for entity in registry.entities for alias in entity.aliases),
-        "entity": tuple(entity.entity_id for entity in registry.entities),
-    }
-    matches = {
-        category: tuple(
-            match
-            for match in _positive_named_matches(normalized, values)
-            if _selector_match_is_anchored(
-                normalized,
-                match[0],
-                match[1],
-                match[2],
-                category,
-                registry,
-            )
-            or (allow_bare_meaningful and not _label_is_grammar_collision(match[2]))
-        )
-        for category, values in labels.items()
-    }
-    longer_specific_spans = tuple(
-        (start, end)
-        for category in ("device", "alias", "entity")
-        for start, end, _value in matches[category]
-    )
-    matches["domain"] = tuple(
-        match
-        for match in matches["domain"]
-        if not any(
-            start <= match[0] and match[1] <= end and (start, end) != match[:2]
-            for start, end in longer_specific_spans
-        )
-    )
-    slot_for = {
-        "domain": "device",
-        "device": "device",
-        "room": "room",
-        "floor": "floor",
-        "alias": "entity",
-        "entity": "entity",
-    }
-    slots = list(dict.fromkeys(
-        slot_for[category]
-        for category, category_matches in matches.items()
-        if category_matches
-    ))
-    present = bool(slots)
-    if not present:
-        return _ExplicitSelectorMatch(False, False, (), (), ())
-    discriminating = any(matches[category] for category in matches if category != "domain")
-
-    values = {
-        category: {value for _start, _end, value in category_matches}
-        for category, category_matches in matches.items()
-    }
-
-    conflicting_slots: list[str] = []
-    mentioned_domains = {
-        GENERIC_DEVICE_ALIASES[value] for value in values["domain"]
-    }
-    if len(mentioned_domains) > 1 or len(values["device"]) > 1:
-        conflicting_slots.append("device")
-    if len(values["room"]) > 1:
-        conflicting_slots.append("room")
-    if len(values["floor"]) > 1:
-        conflicting_slots.append("floor")
-    if len(values["alias"]) > 1 or len(values["entity"]) > 1:
-        conflicting_slots.append("entity")
-
-    def matching_ids(category: str, value: str) -> set[str]:
-        if category == "domain":
-            domain = GENERIC_DEVICE_ALIASES[value]
-            return {entity.entity_id for entity in registry.entities if entity.domain == domain}
-        if category == "room":
-            return {
-                entity.entity_id for entity in registry.entities
-                if normalize_text(entity.room) == value
-            }
-        if category == "floor":
-            return {
-                entity.entity_id for entity in registry.entities
-                if normalize_text(entity.floor) == value
-            }
-        if category == "device":
-            return {
-                entity.entity_id for entity in registry.entities
-                if normalize_text(entity.device) == value
-            }
-        if category == "alias":
-            return {
-                entity.entity_id for entity in registry.entities
-                if any(normalize_text(alias) == value for alias in entity.aliases)
-            }
-        return {
-            entity.entity_id for entity in registry.entities
-            if normalize_text(entity.entity_id) == value
-        }
-
-    # Overlapping text spans can have several inventory meanings (for example
-    # a room ``Study`` and a device ``Study Light``).  A connected overlap
-    # component is ORed; treating its interpretations as independent AND
-    # constraints could silently pick one target from an ambiguous phrase.
-    entries: list[tuple[int, int, str, str]] = []
-    for category, category_matches in matches.items():
-        for start, end, value in category_matches:
-            entries.append((start, end, category, value))
-    components: list[list[tuple[int, int, str, str]]] = []
-    remaining = set(entries)
-    while remaining:
-        component = [remaining.pop()]
-        changed = True
-        while changed:
-            changed = False
-            component_start = min(item[0] for item in component)
-            component_end = max(item[1] for item in component)
-            overlapping = {
-                item for item in remaining
-                if item[0] < component_end and component_start < item[1]
-            }
-            if overlapping:
-                component.extend(overlapping)
-                remaining.difference_update(overlapping)
-                changed = True
-        components.append(component)
-    ambiguous_entries = {
-        entry
-        for component in components
-        if len({entry[2] for entry in component}) > 1
-        for entry in component
-    }
-    constraints: list[set[str]] = []
-    for component in components:
-        if not any(entry in ambiguous_entries for entry in component):
-            continue
-        ids: set[str] = set()
-        for _start, _end, category, value in component:
-            ids.update(matching_ids(category, value))
-        constraints.append(ids)
-    for category, category_matches in matches.items():
-        unambiguous = {
-            value
-            for start, end, value in category_matches
-            if (start, end, category, value) not in ambiguous_entries
-        }
-        if unambiguous:
-            ids: set[str] = set()
-            for value in unambiguous:
-                ids.update(matching_ids(category, value))
-            constraints.append(ids)
-
-    candidate_ids = {entity.entity_id for entity in registry.entities}
-    for constraint in constraints:
-        candidate_ids.intersection_update(constraint)
-    candidates = tuple(
-        entity for entity in registry.entities if entity.entity_id in candidate_ids
-    )
-    return _ExplicitSelectorMatch(
-        True,
-        discriminating,
-        candidates,
-        tuple(slots),
-        tuple(conflicting_slots),
-    )
-
-
 def _explicit_mentioned_entities(
     registry: EntityRegistry,
     utterance: str,
 ) -> tuple[EntitySpec, ...]:
-    """Compatibility wrapper for callers that need only explicit candidates."""
+    """Resolve every explicitly named domain/room pair, independent of model output."""
 
-    return _explicit_selector_match(registry, utterance).candidates
+    normalized = normalize_text(utterance)
+    mentioned_domains = {
+        domain
+        for alias, domain in GENERIC_DEVICE_ALIASES.items()
+        if _phrase_in(normalized, alias)
+    }
+    mentioned_rooms = set(_distinct_named_values(
+        normalized, (entity.room for entity in registry.entities),
+    ))
+    mentioned_floors = set(_distinct_named_values(
+        normalized, (entity.floor for entity in registry.entities),
+    ))
+    mentioned_aliases = set(_distinct_named_values(
+        normalized,
+        (alias for entity in registry.entities for alias in entity.aliases),
+    ))
+    selector_present = bool(mentioned_rooms or mentioned_floors or mentioned_aliases)
+    specific_device_ids = {
+        entity.entity_id
+        for entity in registry.entities
+        if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES
+        and _phrase_in(normalized, entity.device)
+    }
+    mentioned: list[EntitySpec] = []
+    for entity in registry.entities:
+        room_match = normalize_text(entity.room) in mentioned_rooms
+        floor_match = normalize_text(entity.floor) in mentioned_floors
+        alias_match = any(normalize_text(alias) in mentioned_aliases for alias in entity.aliases)
+        # A single named room and floor jointly identify an entity.  When the
+        # utterance names several rooms/floors, keep every matching target so a
+        # one-tuple model output cannot silently truncate the request.
+        discriminator = (
+            (not mentioned_rooms or room_match)
+            and (not mentioned_floors or floor_match)
+        ) or alias_match
+        exact_alias = any(_phrase_in(normalized, alias) for alias in entity.aliases)
+        device_match = (
+            entity.entity_id in specific_device_ids
+            if specific_device_ids
+            else entity.domain in mentioned_domains
+        )
+        if (not selector_present or discriminator) and (device_match or exact_alias):
+            mentioned.append(entity)
+    return tuple(mentioned)
 
 
 def _request_candidates(
@@ -2060,33 +1372,7 @@ def _request_candidates(
     registry: EntityRegistry,
     context: SessionContext,
 ) -> tuple[tuple[DomuxInstruction, ...], tuple[EntitySpec, ...]]:
-    selectors = tuple(
-        _source_selector(utterance, instruction, registry)
-        for instruction in source_instructions
-    )
-
-    explicit = _explicit_selector_match(registry, utterance)
-    deictic = _has_deictic_reference(utterance)
-    if _has_other_reference(utterance) and not context.recent_entity_ids:
-        return selectors, ()
-    if deictic and context.recent_entity_ids:
-        contextual = tuple(
-            registry._by_id[entity_id]
-            for entity_id in dict.fromkeys(context.recent_entity_ids)
-            if entity_id in registry._by_id
-        )
-        if explicit.present:
-            explicitly_mentioned = {entity.entity_id for entity in explicit.candidates}
-            contextual = tuple(
-                entity for entity in contextual if entity.entity_id in explicitly_mentioned
-            )
-        if _has_other_reference(utterance) and len(contextual) < 2:
-            return selectors, ()
-        return selectors, tuple(sorted(contextual, key=registry._sort_key))
-
-    if explicit.present:
-        return selectors, explicit.candidates
-
+    selectors = tuple(_source_selector(utterance, instruction) for instruction in source_instructions)
     by_id: dict[str, EntitySpec] = {}
     for selector in selectors:
         for entity in registry.candidates(selector, context):
@@ -2094,19 +1380,11 @@ def _request_candidates(
     if _has_uncertainty_or_conflict(utterance):
         for entity in _mentioned_entities(registry, utterance, source_instructions):
             by_id[entity.entity_id] = entity
+    explicitly_mentioned = _explicit_mentioned_entities(registry, utterance)
+    if len(explicitly_mentioned) > 1:
+        for entity in explicitly_mentioned:
+            by_id[entity.entity_id] = entity
     return selectors, tuple(sorted(by_id.values(), key=registry._sort_key))
-
-
-def _has_other_reference(text: str) -> bool:
-    return bool(re.search(OTHER_REFERENCE_RE, normalize_text(text)))
-
-
-def _has_deictic_reference(text: str) -> bool:
-    normalized = normalize_text(text)
-    return _has_other_reference(normalized) or any(
-        _phrase_in(normalized, phrase)
-        for phrase in ("it", "that", "that one", "this", "this one")
-    )
 
 
 @dataclass(frozen=True)
@@ -2147,13 +1425,6 @@ def ground_domux_request(
     excluded_value_tokens = _excluded_operation_value_tokens(utterance, source)
     reasons: list[str] = []
     unresolved: list[str] = []
-    explicit_selector = _explicit_selector_match(registry, utterance)
-    valid_context_ids = tuple(
-        entity_id
-        for entity_id in dict.fromkeys(context.recent_entity_ids)
-        if entity_id in registry._by_id
-    )
-    other_reference = _has_other_reference(utterance)
     if not candidates:
         reasons.append("no_registry_match")
     elif len(candidates) > 1:
@@ -2162,38 +1433,15 @@ def ground_domux_request(
         reasons.append("multiple_model_instructions")
     if _has_uncertainty_or_conflict(utterance):
         reasons.append("uncertainty_or_conflict")
-    if explicit_selector.conflicting_slots:
-        reasons.append("multiple_explicit_selectors")
-        unresolved.extend(explicit_selector.conflicting_slots)
     if _has_negative_or_cancelled_intent(utterance):
         reasons.append("negative_or_cancelled_intent")
     if not _has_supported_request_grammar(utterance, registry, source):
         reasons.append("unsupported_request_grammar")
         unresolved.append("authorization")
-    if (
-        _has_deictic_reference(utterance)
-        and not context.recent_entity_ids
-        and not explicit_selector.discriminating
-    ):
+    if _phrase_in(normalize_text(utterance), "other one") and not context.recent_entity_ids:
         reasons.append("unsupported_request_grammar")
         unresolved.append("authorization")
-    if other_reference:
-        reasons.append("other_reference_requires_selection")
-        unresolved.append("context")
-        if len(valid_context_ids) < 2:
-            reasons.append("unsupported_request_grammar")
-            unresolved.append("authorization")
-    if _has_deictic_reference(utterance) and any(
-        entity_id not in registry._by_id
-        for entity_id in context.recent_entity_ids
-    ):
-        reasons.append("stale_context_reference")
-        unresolved.append("context")
-    if (
-        _has_unresolved_generic_exclusion(utterance)
-        and not negated_entity_ids
-        and not (other_reference and len(valid_context_ids) >= 2)
-    ):
+    if _has_unresolved_generic_exclusion(utterance):
         reasons.append("unsupported_request_grammar")
         unresolved.append("authorization")
     informational_request = _has_informational_request(utterance)
@@ -2205,18 +1453,10 @@ def ground_domux_request(
         unresolved.append("condition_or_time")
     if negated_entity_ids:
         reasons.append("negated_selector")
-    if excluded_value_tokens:
+    if _has_operation_value_exclusion(operational_utterance):
         reasons.append("excluded_operation_value")
         unresolved.append("value")
     explicit_requirements = _explicit_operational_requirements(operational_utterance)
-    unresolved.extend(_partial_registry_selector_slots(utterance, registry))
-    unresolved.extend(_unanchored_registry_selector_slots(utterance, registry))
-    unresolved.extend(_unresolved_selector_phrase_slots(utterance))
-    if _positional_unknown_selector_words(utterance, registry):
-        unresolved.append("device")
-    if _positional_unknown_attribute_words(utterance, registry):
-        unresolved.append("attribute")
-        reasons.append("unknown_operation_modifier")
     for instruction, selector in zip(source, selectors):
         for slot in ("device", "attribute", "room", "floor"):
             if getattr(instruction, slot) != getattr(selector, slot):
@@ -2321,35 +1561,10 @@ def ground_domux_request(
 def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> EntitySpec:
     if not isinstance(answer, str) or not answer.strip():
         raise GroundingError("clarification answer is empty")
-    if not candidates:
-        raise GroundingError("clarification has no candidates")
     answer_norm = normalize_text(answer)
-    answer_registry = EntityRegistry(candidates)
-    answer_selector = _explicit_selector_match(
-        answer_registry,
-        answer,
-        allow_bare_meaningful=True,
-    )
-    if answer_selector.present and (
-        answer_selector.conflicting_slots or not answer_selector.candidates
-    ):
-        raise GroundingError("clarification answer has inconsistent target selectors")
     if _has_unresolved_generic_exclusion(answer_norm):
-        selected = (
-            answer_selector.candidates[0]
-            if len(answer_selector.candidates) == 1
-            else None
-        )
-        excluded_domains = _excluded_generic_domains(answer)
-        if not (
-            answer_selector.discriminating
-            and selected is not None
-            and not answer_selector.conflicting_slots
-            and excluded_domains
-            and selected.domain not in excluded_domains
-        ):
-            raise GroundingError("clarification answer uses an unresolved generic exclusion")
-    other = re.search(OTHER_REFERENCE_RE, answer_norm)
+        raise GroundingError("clarification answer uses an unresolved generic exclusion")
+    other = re.search(r"\b(?:the\s+)?other\s+one\b", answer_norm)
     if other is not None:
         suffix = answer_norm[other.end():]
         explicit_after = any(
@@ -2369,22 +1584,14 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
         return exact_id[0]
     if len(candidates) == 1:
         candidate = candidates[0]
-        exclusion_labels = [candidate.room, candidate.floor, *candidate.aliases]
-        if normalize_text(candidate.device) not in GENERIC_DEVICE_ALIASES:
-            exclusion_labels.append(candidate.device)
-        for label in exclusion_labels:
+        for label in (candidate.room, candidate.floor, candidate.device, *candidate.aliases):
             if _label_is_excluded(answer_norm, label):
                 raise GroundingError("clarification answer excludes the only candidate")
         if _answer_is_noncommittal(answer_norm):
             raise GroundingError("clarification answer is noncommittal")
         identifies_candidate = any(
-            _selector_label_evidence(answer, label, category, EntityRegistry(candidates))
-            for category, label in (
-                ("entity", candidate.entity_id),
-                ("room", candidate.room),
-                ("floor", candidate.floor),
-                *(("alias", alias) for alias in candidate.aliases),
-            )
+            _phrase_in(answer_norm, label)
+            for label in (candidate.entity_id, candidate.room, candidate.floor, *candidate.aliases)
         )
         supplies_operation = bool(_explicit_operational_requirements(answer)) or bool(
             _directional_actions(answer_norm)
@@ -2405,18 +1612,9 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
             key = (kind, normalize_text(value))
             feature_counts[key] = feature_counts.get(key, 0) + 1
     scored: list[tuple[int, EntitySpec]] = []
-    candidate_registry = EntityRegistry(candidates)
-    selector_candidate_ids = {
-        entity.entity_id for entity in answer_selector.candidates
-    } if answer_selector.present else {entity.entity_id for entity in candidates}
     for entity in candidates:
-        if entity.entity_id not in selector_candidate_ids:
-            continue
         negative = False
-        exclusion_labels = [entity.room, entity.floor, *entity.aliases]
-        if normalize_text(entity.device) not in GENERIC_DEVICE_ALIASES:
-            exclusion_labels.append(entity.device)
-        for label in exclusion_labels:
+        for label in (entity.room, entity.floor, entity.device, *entity.aliases):
             if _label_is_excluded(answer_norm, label):
                 negative = True
         if negative:
@@ -2429,17 +1627,9 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
             ("room", entity.room, 8), ("floor", entity.floor, 5), ("device", entity.device, 4)
         ):
             key = (kind, normalize_text(value))
-            selector_category = (
-                "domain" if normalize_text(value) in GENERIC_DEVICE_ALIASES else kind
-            )
-            if feature_counts[key] < len(candidates) and _selector_label_evidence(
-                answer, value, selector_category, candidate_registry,
-            ):
+            if feature_counts[key] < len(candidates) and _phrase_in(answer_norm, value):
                 score += weight
-        score += 10 * sum(
-            _selector_label_evidence(answer, alias, "alias", candidate_registry)
-            for alias in entity.aliases
-        )
+        score += 10 * sum(_phrase_in(answer_norm, alias) for alias in entity.aliases)
         if score:
             scored.append((score, entity))
     if not scored:
@@ -2449,102 +1639,6 @@ def resolve_clarification(answer: str, candidates: Sequence[EntitySpec]) -> Enti
     if len(matches) != 1:
         raise GroundingError(f"clarification answer selects {len(matches)} candidates")
     return matches[0]
-
-
-def _answer_repairs_target_slots(
-    answer: str,
-    chosen: EntitySpec,
-    candidates: Sequence[EntitySpec],
-    unresolved_slots: Sequence[str],
-    registry: EntityRegistry,
-) -> bool:
-    answer_normalized = normalize_text(answer)
-    exact_global = answer_normalized.isdigit() or _phrase_in(answer_normalized, chosen.entity_id)
-    if exact_global:
-        return True
-    alias_evidence = any(
-        _selector_label_evidence(answer, alias, "alias", registry)
-        and sum(
-            normalize_text(alias) in {normalize_text(item) for item in candidate.aliases}
-            for candidate in candidates
-        ) == 1
-        for alias in chosen.aliases
-    )
-    if alias_evidence:
-        return True
-
-    answer_selector = _explicit_selector_match(registry, answer)
-    strong_target_evidence = (
-        answer_selector.present
-        and tuple(entity.entity_id for entity in answer_selector.candidates) == (chosen.entity_id,)
-    )
-
-    room_evidence = _selector_label_evidence(answer, chosen.room, "room", registry)
-    floor_evidence = _selector_label_evidence(answer, chosen.floor, "floor", registry)
-    specific_device_evidence = (
-        normalize_text(chosen.device) not in GENERIC_DEVICE_ALIASES
-        and _selector_label_evidence(answer, chosen.device, "device", registry)
-    )
-    room_unique = room_evidence and sum(
-        normalize_text(candidate.room) == normalize_text(chosen.room)
-        for candidate in candidates
-    ) == 1
-    floor_unique = floor_evidence and sum(
-        normalize_text(candidate.floor) == normalize_text(chosen.floor)
-        for candidate in candidates
-    ) == 1
-    device_unique = specific_device_evidence and sum(
-        normalize_text(candidate.device) == normalize_text(chosen.device)
-        for candidate in candidates
-    ) == 1
-    for slot in set(unresolved_slots).intersection({
-        "device", "room", "floor", "entity", "context",
-    }):
-        if slot == "room" and not room_evidence:
-            return False
-        if slot == "floor" and not (floor_evidence or strong_target_evidence):
-            return False
-        if slot == "device" and not (
-            specific_device_evidence or strong_target_evidence
-            or room_unique or (room_evidence and floor_evidence)
-        ):
-            return False
-        if slot == "entity" and not (
-            strong_target_evidence or room_unique or floor_unique or device_unique
-        ):
-            return False
-        if slot == "context" and not (
-            strong_target_evidence or room_unique or floor_unique or device_unique
-        ):
-            return False
-    return True
-
-
-def _initial_target_is_fully_bound(
-    grounded: GroundedRequest,
-    chosen: EntitySpec,
-    registry: EntityRegistry,
-) -> bool:
-    """Return whether the user's original selector already fixes the target.
-
-    A clarification may then repair only operation slots.  Model-proposed
-    room/floor fields, context-only references, partial labels, and unknown or
-    relational selectors never qualify as an already-bound target.
-    """
-
-    explicit = _explicit_selector_match(registry, grounded.utterance)
-    return (
-        explicit.discriminating
-        and tuple(entity.entity_id for entity in explicit.candidates) == (chosen.entity_id,)
-        and not explicit.conflicting_slots
-        and not _partial_registry_selector_slots(grounded.utterance, registry)
-        and not _unanchored_registry_selector_slots(grounded.utterance, registry)
-        and not _unresolved_selector_phrase_slots(grounded.utterance)
-        and not _positional_unknown_selector_words(grounded.utterance, registry)
-        and not _has_other_reference(grounded.utterance)
-        and "stale_context_reference" not in grounded.clarification.reasons
-        and chosen.entity_id not in grounded.negated_entity_ids
-    )
 
 
 def _validate_confirmed_instruction(
@@ -2566,12 +1660,9 @@ def _validate_confirmed_instruction(
         raise GroundingError("clarification answer is informational, not an authorization")
     if chosen.entity_id in grounded.negated_entity_ids:
         raise GroundingError("clarification selected an entity explicitly excluded by the user")
-    chosen_exclusion_labels = [chosen.room, chosen.floor, *chosen.aliases]
-    if normalize_text(chosen.device) not in GENERIC_DEVICE_ALIASES:
-        chosen_exclusion_labels.append(chosen.device)
     if any(
         _label_is_excluded(answer_normalized, label)
-        for label in chosen_exclusion_labels
+        for label in (chosen.room, chosen.floor, chosen.device, *chosen.aliases)
     ):
         raise GroundingError("clarification answer explicitly excludes the selected entity")
     confirmed_value_token = _operation_value_token(confirmed.value)
@@ -2601,16 +1692,8 @@ def _validate_confirmed_instruction(
         raise GroundingError("clarification answer contains an unsupported condition or time")
     if _has_negative_or_cancelled_intent(operational_answer):
         raise GroundingError("clarification answer cancels the request")
-    if not _clarification_has_positive_authorization(answer, chosen, registry.entities):
+    if not _clarification_has_positive_authorization(answer, chosen, grounded.candidates):
         raise GroundingError("clarification answer has no positive authorization evidence")
-    target_was_bound = _initial_target_is_fully_bound(grounded, chosen, registry)
-    if not target_was_bound and not _answer_repairs_target_slots(
-        answer, chosen, grounded.candidates,
-        grounded.clarification.unresolved_slots, registry,
-    ):
-        raise GroundingError(
-            "clarification answer must explicitly identify the repaired target"
-        )
     answer_requirements = _answer_operational_requirements(answer, chosen)
     for slot in answer_requirements:
         if getattr(confirmed, slot) == "*":
@@ -2694,12 +1777,6 @@ def _validate_confirmed_instruction(
             return _value_supported(operational_answer, confirmed.value)
         return _unit_supported(operational_answer, confirmed)
 
-    if (
-        "unknown_operation_modifier" in grounded.clarification.reasons
-        and not answer_supports("attribute")
-    ):
-        raise GroundingError("unknown operation modifier is not repaired by the answer")
-
     # A conflicted value/action must be selected in the answer itself.  It may
     # not be assembled from unrelated clauses in the original request.
     original_normalized = normalize_text(operational_utterance)
@@ -2748,10 +1825,7 @@ def _validate_confirmed_instruction(
         ]
         if not all(answer_supports(slot) for slot in changed):
             continue
-        source_candidates = registry.candidates(
-            _source_selector(grounded.utterance, source, registry),
-            context,
-        )
+        source_candidates = registry.candidates(_source_selector(grounded.utterance, source), context)
         source_targets_chosen = any(entity.entity_id == chosen.entity_id for entity in source_candidates)
         if source_targets_chosen or all(answer_supports(slot) for slot in conflicted_slots):
             patchable = True
@@ -2808,27 +1882,12 @@ def resolve_clarification_submission(
         raise GroundingError("conditional or timed requests require a new immediate command")
     if "unsupported_request_grammar" in grounded.clarification.reasons:
         raise GroundingError("unsupported request language requires a new immediate command")
-    confirmed_value_token = _operation_value_token(confirmed_instruction.value)
-    if confirmed_value_token in grounded.excluded_operation_value_tokens:
-        raise GroundingError("confirmed value was explicitly excluded by the user")
     if not answer.strip():
         raise GroundingError("clarification answer is empty")
     if _answer_is_noncommittal(normalize_text(answer)):
         raise GroundingError("clarification answer is noncommittal")
     if len(grounded.candidates) > len(grounded.clarification.candidates):
         raise GroundingError("candidate set is not narrow enough to present safely")
-    answer_normalized = normalize_text(answer)
-    for entity_id in grounded.negated_entity_ids:
-        excluded = registry.get(entity_id)
-        labels = [excluded.entity_id, excluded.room, *excluded.aliases]
-        if normalize_text(excluded.device) not in GENERIC_DEVICE_ALIASES:
-            labels.append(excluded.device)
-        if any(
-            _phrase_in(answer_normalized, label)
-            and not _label_is_excluded(answer_normalized, label)
-            for label in labels
-        ):
-            raise GroundingError("clarification selects an explicitly excluded entity")
     chosen = resolve_clarification(answer, grounded.candidates)
     _validate_confirmed_instruction(grounded, answer, confirmed_instruction, chosen, registry)
     clarification_digest = digest_json({
@@ -2851,10 +1910,6 @@ def resolve_unique_request(grounded: GroundedRequest, registry: EntityRegistry) 
     # client-provided selector, binds the target in this path.
     if not EntityRegistry._device_matches(chosen, confirmed.device):
         raise GroundingError("unique request device does not match its candidate")
-    if confirmed.room != "*" and normalize_text(confirmed.room) != normalize_text(chosen.room):
-        raise GroundingError("unique request room does not match its candidate")
-    if confirmed.floor != "*" and normalize_text(confirmed.floor) != normalize_text(chosen.floor):
-        raise GroundingError("unique request floor does not match its candidate")
     clarification_digest = digest_json({
         "request_digest": grounded.request_digest,
         "answer": "unique_without_clarification",
