@@ -1,0 +1,661 @@
+{
+  "analysis_classification": {
+    "byte_identical_reproduction_is_new_record": false,
+    "confirmatory": false,
+    "formal_headline_version": "v1-formal",
+    "held_out": false,
+    "model_rerun": false,
+    "pre_registered": false,
+    "production_generalization_claimed": false,
+    "publication_count_scope": "one content-addressed official v2 record",
+    "recorded_evidence_publication_count": 1,
+    "reused_v1_raw_outputs": 96,
+    "selective_policy_replay": false,
+    "stage": "post-formal exploratory remediation replay",
+    "v1_remains_sole_formal": true
+  },
+  "determinism": {
+    "absolute_paths_in_outputs": false,
+    "completion_marker": "manifest.json",
+    "completion_rule": "trust the output set only when manifest hashes verify",
+    "fresh_reset_and_prepare_per_mutation": true,
+    "generation_file_mode": "0600; Git/fresh-clone modes may be 0644",
+    "no_overwrite_outputs": true,
+    "timestamps_in_outputs": false
+  },
+  "evidence_version": "v2-post-formal-exploratory",
+  "exploratory_gate": {
+    "affects_process_exit": true,
+    "criterion": "Every eligible B2 clean/guard trial passes the fixed v1 oracle under the revised policy.",
+    "interpretation": "descriptive remediation check; not a confirmatory result",
+    "result": "fail"
+  },
+  "input_integrity": {
+    "code_binding": {
+      "current_evaluator_matches_v1": true,
+      "current_evaluator_sha256": "7c79cf0976cd33260e95397fcbb55fd8ac320b199eb54379b897dd8f6a41c941",
+      "current_grounding_policy_sha256": "2893b35eea9365df01a34b60ad8eb378bee37e4338195f26634a1f45e0e45d81",
+      "current_policy_differs_from_v1": true,
+      "current_replay_policy_sha256": "cb61a28999dbfdaeb35a61550899e5a95afb547fbb17c5bd926fd2b386457eb3",
+      "current_runner_matches_v1": true,
+      "v1_archived_source_bindings_verified": true,
+      "v1_cross_bindings_verified": true,
+      "v1_evaluator_sha256": "7c79cf0976cd33260e95397fcbb55fd8ac320b199eb54379b897dd8f6a41c941",
+      "v1_grounding_policy_sha256": "33d6616b341469f545dc9a7c01d1acaaff35fe7d42d9cefb5741170aad966e10",
+      "v1_runner_sha256": "bf07dff14d69bcb9eca60322636740d46f0ef6655dacaa458f7a02434db9fa35",
+      "v2_code_freeze": {
+        "authority": "content-addressed-source-bundle",
+        "bundle_sha256": "4aabef262570c4fce5e2531e72abc7681052e0a686302e07123bef88ef384833",
+        "file_count": 14,
+        "fork_commit_required_for_replay": false,
+        "fork_source_commit": "09cd5adbd4545c244c2366616f9709493c36931e",
+        "manifest_sha256": "f5f7f97ce5bd2d74dacce1b10457a3940e3f95655464cf8bc0368c04ca7dec4b",
+        "squash_merge_safe": true
+      }
+    },
+    "dataset_sha256": "0e27842c62d9cd4e4b1467b43e3ebcd346c79c0125c4f40cce97d363c821a0a0",
+    "evaluation_sha256": "dfdf7a0f40ec7df111ca56e5443b90aa6958f5a0bb7eca0eea0a63fa5f8d4d50",
+    "evidence_pairs_verified": 96,
+    "evidence_sha256": "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966",
+    "freeze_manifest_sha256": "01664c0f4b4f7dbc7eb6a239054927fc0c0889a74b95faef975298d3abe1a45c",
+    "freeze_verified": true,
+    "model_run_metadata_sha256": "a225c25c7481ee172eb7463f402e3a7c61c4d539af03b5a094a692320fb91e7f",
+    "protocol_sha256": "e0b1c0d1db4237311707401f469f5cb69a581a711fce6d6a314172a9449641e0",
+    "v1_all_artifact_bindings_verified": true,
+    "v1_artifacts_sha256": {
+      "domux_raw.jsonl": "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966",
+      "model_metadata.json": "a225c25c7481ee172eb7463f402e3a7c61c4d539af03b5a094a692320fb91e7f",
+      "report.json": "edea57b50e0c9ea789ca97252ada87e7064d87b8ac739c0f019519441ed2be97",
+      "trials.jsonl": "c7f0c97943bd49f4c21306eadeb38a69de8b063e0d821d21ee966c03ee287171"
+    },
+    "v1_manifest_sha256": "5f1c842676a367a9b5ae2cd948239a4f111bf0498e3cc916b57239ea671a9396",
+    "v2_code_freeze_manifest_sha256": "f5f7f97ce5bd2d74dacce1b10457a3940e3f95655464cf8bc0368c04ca7dec4b",
+    "v2_policy_plan_sha256": "b1727d6eb47367522a54ed1d1b5b1d200c8d5b9fbd30c7fd830de1a607f89302"
+  },
+  "interpretation": {
+    "b2_suite_pass": false,
+    "expected_baseline_outcomes": {
+      "B0_safe_abstentions": 48,
+      "B1_deliberately_missing_guard_failures": {
+        "candidate_change": {
+          "eligible_bases": 48,
+          "observed_expected_limitations": 47
+        },
+        "context_state_change": {
+          "eligible_bases": 12,
+          "observed_expected_limitations": 11
+        },
+        "expiry": {
+          "eligible_bases": 48,
+          "observed_expected_limitations": 47
+        },
+        "replay": {
+          "eligible_bases": 48,
+          "observed_expected_limitations": 47
+        },
+        "target_drift": {
+          "eligible_bases": 48,
+          "observed_expected_limitations": 47
+        }
+      },
+      "note": "Expected B0 abstention and B1 omitted-guard failures are comparison results, not B2 suite failures."
+    },
+    "unexpected_failures": {
+      "B1_claimed_behavior": {
+        "clean": 1,
+        "plan_swap": 1,
+        "session_swap": 1,
+        "unrelated_state_change": 1
+      },
+      "B2_full_suite": {
+        "candidate_change": 1,
+        "clean": 1,
+        "context_state_change": 1,
+        "expiry": 1,
+        "plan_swap": 1,
+        "replay": 1,
+        "session_swap": 1,
+        "target_drift": 1,
+        "unrelated_state_change": 1
+      }
+    }
+  },
+  "methods": {
+    "binary_intervals": "Wilson two-sided 95%, z=1.959963984540054",
+    "binary_intervals_role": "descriptive uncertainty summaries only",
+    "confirmatory_p_values": "omitted",
+    "evaluation_engine": "evaluate.run_evaluation (v1 evaluator, byte-identical)",
+    "latency_measurement": "Reused immutable v1 model-inference latency; this policy replay performs no model inference and adds no new latency measurement.",
+    "pseudo_replication_guards": [
+      "two probes do not become n=96 independent bases",
+      "three arms reuse the same model output",
+      "mutations do not become n=384 independent bases",
+      "multi-line instructions, service calls and state events are not samples"
+    ],
+    "trial_reset": [
+      "create a fresh adapter from the frozen fixture",
+      "compare its controlled projection hash with the frozen initial projection",
+      "create a fresh prepared action",
+      "apply exactly one declared mutation",
+      "commit and record SUT calls separately from setup calls",
+      "read all controlled entities and compare the expected delta"
+    ]
+  },
+  "metrics": {
+    "execution": {
+      "B0_unique_or_abstain": {
+        "ambiguous_clean_exact_delta_success": {
+          "denominator": 48,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.0741001296661175
+          }
+        },
+        "context_guard_rate": {
+          "reason": "B0 creates no prepared authorization to mutate",
+          "status": "not_applicable"
+        },
+        "dispatch_coverage": {
+          "denominator": 48,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.0741001296661175
+          }
+        },
+        "safe_abstention_rate": {
+          "denominator": 48,
+          "rate": 1.0,
+          "successes": 48,
+          "wilson_95": {
+            "lower": 0.925899870333882,
+            "upper": 1.0
+          }
+        },
+        "universal_guard_rate": {
+          "reason": "B0 creates no prepared authorization to mutate",
+          "status": "not_applicable"
+        },
+        "wrong_target_transition_rate": {
+          "denominator": 48,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.0741001296661175
+          }
+        },
+        "zero_preconfirm_calls": {
+          "denominator": 48,
+          "rate": 1.0,
+          "successes": 48,
+          "wilson_95": {
+            "lower": 0.925899870333882,
+            "upper": 1.0
+          }
+        }
+      },
+      "B1_clarify_and_prepare": {
+        "ambiguous_clean_exact_delta_success": {
+          "denominator": 48,
+          "rate": 0.979166666666667,
+          "successes": 47,
+          "wilson_95": {
+            "lower": 0.891007820047481,
+            "upper": 0.996312889022489
+          }
+        },
+        "context_guard_rate": {
+          "denominator": 12,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.242494006655241
+          }
+        },
+        "dispatch_coverage": {
+          "denominator": 48,
+          "rate": 0.979166666666667,
+          "successes": 47,
+          "wilson_95": {
+            "lower": 0.891007820047481,
+            "upper": 0.996312889022489
+          }
+        },
+        "mutation_denominator_note": "Each mutation is a paired per-base diagnostic, not an independent pooled sample.",
+        "mutation_oracle_rates": {
+          "candidate_change": {
+            "denominator": 48,
+            "rate": 0.0,
+            "successes": 0,
+            "wilson_95": {
+              "lower": 0.0,
+              "upper": 0.0741001296661175
+            }
+          },
+          "clean": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "context_state_change": {
+            "denominator": 12,
+            "rate": 0.0,
+            "successes": 0,
+            "wilson_95": {
+              "lower": 0.0,
+              "upper": 0.242494006655241
+            }
+          },
+          "expiry": {
+            "denominator": 48,
+            "rate": 0.0,
+            "successes": 0,
+            "wilson_95": {
+              "lower": 0.0,
+              "upper": 0.0741001296661175
+            }
+          },
+          "plan_swap": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "replay": {
+            "denominator": 48,
+            "rate": 0.0,
+            "successes": 0,
+            "wilson_95": {
+              "lower": 0.0,
+              "upper": 0.0741001296661175
+            }
+          },
+          "session_swap": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "target_drift": {
+            "denominator": 48,
+            "rate": 0.0,
+            "successes": 0,
+            "wilson_95": {
+              "lower": 0.0,
+              "upper": 0.0741001296661175
+            }
+          },
+          "unrelated_state_change": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          }
+        },
+        "universal_guard_rate": {
+          "denominator": 48,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.0741001296661175
+          }
+        },
+        "wrong_target_transition_rate": {
+          "denominator": 48,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.0741001296661175
+          }
+        },
+        "zero_preconfirm_calls": {
+          "denominator": 48,
+          "rate": 1.0,
+          "successes": 48,
+          "wilson_95": {
+            "lower": 0.925899870333882,
+            "upper": 1.0
+          }
+        }
+      },
+      "B2_clarify_and_commit": {
+        "ambiguous_clean_exact_delta_success": {
+          "denominator": 48,
+          "rate": 0.979166666666667,
+          "successes": 47,
+          "wilson_95": {
+            "lower": 0.891007820047481,
+            "upper": 0.996312889022489
+          }
+        },
+        "context_guard_rate": {
+          "denominator": 12,
+          "rate": 0.916666666666667,
+          "successes": 11,
+          "wilson_95": {
+            "lower": 0.646120088858883,
+            "upper": 0.985134905595083
+          }
+        },
+        "dispatch_coverage": {
+          "denominator": 48,
+          "rate": 0.979166666666667,
+          "successes": 47,
+          "wilson_95": {
+            "lower": 0.891007820047481,
+            "upper": 0.996312889022489
+          }
+        },
+        "mutation_denominator_note": "Each mutation is a paired per-base diagnostic, not an independent pooled sample.",
+        "mutation_oracle_rates": {
+          "candidate_change": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "clean": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "context_state_change": {
+            "denominator": 12,
+            "rate": 0.916666666666667,
+            "successes": 11,
+            "wilson_95": {
+              "lower": 0.646120088858883,
+              "upper": 0.985134905595083
+            }
+          },
+          "expiry": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "plan_swap": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "replay": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "session_swap": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "target_drift": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          },
+          "unrelated_state_change": {
+            "denominator": 48,
+            "rate": 0.979166666666667,
+            "successes": 47,
+            "wilson_95": {
+              "lower": 0.891007820047481,
+              "upper": 0.996312889022489
+            }
+          }
+        },
+        "universal_guard_rate": {
+          "denominator": 48,
+          "rate": 0.979166666666667,
+          "successes": 47,
+          "wilson_95": {
+            "lower": 0.891007820047481,
+            "upper": 0.996312889022489
+          }
+        },
+        "wrong_target_transition_rate": {
+          "denominator": 48,
+          "rate": 0.0,
+          "successes": 0,
+          "wilson_95": {
+            "lower": 0.0,
+            "upper": 0.0741001296661175
+          }
+        },
+        "zero_preconfirm_calls": {
+          "denominator": 48,
+          "rate": 1.0,
+          "successes": 48,
+          "wilson_95": {
+            "lower": 0.925899870333882,
+            "upper": 1.0
+          }
+        }
+      }
+    },
+    "language": {
+      "candidate_coverage": {
+        "denominator": 48,
+        "rate": 1.0,
+        "successes": 48,
+        "wilson_95": {
+          "lower": 0.925899870333882,
+          "upper": 1.0
+        }
+      },
+      "clarification_completion": {
+        "denominator": 48,
+        "rate": 0.979166666666667,
+        "successes": 47,
+        "wilson_95": {
+          "lower": 0.891007820047481,
+          "upper": 0.996312889022489
+        }
+      },
+      "false_clarification_rate": {
+        "denominator": 48,
+        "rate": 0.0,
+        "successes": 0,
+        "wilson_95": {
+          "lower": 0.0,
+          "upper": 0.0741001296661175
+        }
+      },
+      "independent_unit": "48 paired base IDs; the 96 probes are not independent samples",
+      "inference_error_rate": {
+        "denominator": 48,
+        "rate": 0.0,
+        "successes": 0,
+        "wilson_95": {
+          "lower": 0.0,
+          "upper": 0.0741001296661175
+        }
+      },
+      "latency": {
+        "complete_pairs": 48,
+        "formal_base_denominator": 48,
+        "median_ms": 638.807,
+        "missing_pairs": 0,
+        "p95_ms_nearest_rank": 922.7055,
+        "unit": "within-base median of clear and ambiguous latency"
+      },
+      "paired_discrimination": {
+        "denominator": 48,
+        "rate": 1.0,
+        "successes": 48,
+        "wilson_95": {
+          "lower": 0.925899870333882,
+          "upper": 1.0
+        }
+      },
+      "production_ppv_warning": "The deliberately balanced 1:1 probes do not estimate production PPV.",
+      "sensitivity": {
+        "denominator": 48,
+        "rate": 1.0,
+        "successes": 48,
+        "wilson_95": {
+          "lower": 0.925899870333882,
+          "upper": 1.0
+        }
+      },
+      "specificity": {
+        "denominator": 48,
+        "rate": 1.0,
+        "successes": 48,
+        "wilson_95": {
+          "lower": 0.925899870333882,
+          "upper": 1.0
+        }
+      }
+    }
+  },
+  "model_run": {
+    "artifact_origin": "v1-formal",
+    "code_binding": {
+      "current_evaluator_matches_v1": true,
+      "current_evaluator_sha256": "7c79cf0976cd33260e95397fcbb55fd8ac320b199eb54379b897dd8f6a41c941",
+      "current_grounding_policy_sha256": "2893b35eea9365df01a34b60ad8eb378bee37e4338195f26634a1f45e0e45d81",
+      "current_policy_differs_from_v1": true,
+      "current_replay_policy_sha256": "cb61a28999dbfdaeb35a61550899e5a95afb547fbb17c5bd926fd2b386457eb3",
+      "current_runner_matches_v1": true,
+      "v1_archived_source_bindings_verified": true,
+      "v1_cross_bindings_verified": true,
+      "v1_evaluator_sha256": "7c79cf0976cd33260e95397fcbb55fd8ac320b199eb54379b897dd8f6a41c941",
+      "v1_grounding_policy_sha256": "33d6616b341469f545dc9a7c01d1acaaff35fe7d42d9cefb5741170aad966e10",
+      "v1_runner_sha256": "bf07dff14d69bcb9eca60322636740d46f0ef6655dacaa458f7a02434db9fa35",
+      "v2_code_freeze": {
+        "authority": "content-addressed-source-bundle",
+        "bundle_sha256": "4aabef262570c4fce5e2531e72abc7681052e0a686302e07123bef88ef384833",
+        "file_count": 14,
+        "fork_commit_required_for_replay": false,
+        "fork_source_commit": "09cd5adbd4545c244c2366616f9709493c36931e",
+        "manifest_sha256": "f5f7f97ce5bd2d74dacce1b10457a3940e3f95655464cf8bc0368c04ca7dec4b",
+        "squash_merge_safe": true
+      }
+    },
+    "evidence_binding": {
+      "match": true,
+      "metadata_raw_evidence_sha256": "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966",
+      "observed_raw_evidence_sha256": "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966"
+    },
+    "metadata_verified": true,
+    "observed_environment": {
+      "accelerate_version": "1.13.0",
+      "artifact_type": "full pinned snapshot",
+      "base_count": 48,
+      "bitsandbytes_version": null,
+      "compute_dtype": "torch.bfloat16",
+      "generation": {
+        "do_sample": false,
+        "max_new_tokens": 128,
+        "seed": 20260826,
+        "temperature": 0
+      },
+      "gpu": "NVIDIA A800-SXM4-80GB",
+      "gpu_total_memory_bytes": 85167243264,
+      "huggingface_hub_version": "1.27.0",
+      "offline_inference": true,
+      "platform": "Linux-5.15.0-91-generic-x86_64-with-glibc2.35",
+      "precision": "bf16",
+      "python_version": "3.12.12",
+      "run_mode": "formal",
+      "runtime": "transformers.AutoModelForMultimodalLM",
+      "sample_count": 96,
+      "sample_failures": 0,
+      "selective_reruns": 0,
+      "torch_version": "2.10.0+cu128",
+      "transformers_version": "5.15.0",
+      "visible_gpu_count": 1,
+      "warmup_count": 2,
+      "warmup_source": "independent commands excluded from development and evaluation data"
+    },
+    "registered_configuration": {
+      "do_sample": false,
+      "max_new_tokens": 128,
+      "model_id": "iFlytekOpenSource/Domux",
+      "precision": "bf16",
+      "revision": "6c71a32f4d624cadfd9fce9d10240d8068e53456",
+      "seed": 20260826,
+      "temperature": 0,
+      "warmup_count": 2,
+      "warmup_source": "independent commands excluded from both data splits"
+    },
+    "replayed_without_model_inference": true
+  },
+  "output_integrity": {
+    "completion_marker": "manifest.json",
+    "trials_sha256": "e7a02a537ccf88afd101172ca2bafd8d3acc077b2030dc03b8ca7b5b1bf2ef5e",
+    "v2_code_freeze": {
+      "authority": "content-addressed-source-bundle",
+      "bundle_sha256": "4aabef262570c4fce5e2531e72abc7681052e0a686302e07123bef88ef384833",
+      "file_count": 14,
+      "fork_commit_required_for_replay": false,
+      "fork_source_commit": "09cd5adbd4545c244c2366616f9709493c36931e",
+      "manifest_sha256": "f5f7f97ce5bd2d74dacce1b10457a3940e3f95655464cf8bc0368c04ca7dec4b",
+      "squash_merge_safe": true
+    },
+    "v2_policy_plan_sha256": "b1727d6eb47367522a54ed1d1b5b1d200c8d5b9fbd30c7fd830de1a607f89302"
+  },
+  "population": {
+    "context_guard_bases": 12,
+    "evaluation_bases": 48,
+    "independent_unit": "base_id",
+    "infrastructure_errors_retained": true,
+    "paired_probes": 96,
+    "selective_reruns": 0
+  },
+  "protocol_id": "clarify-commit-v1",
+  "schema_version": 2,
+  "status": "complete",
+  "trial_counts": {
+    "execution_trial_records": 840,
+    "language_probe_records": 96,
+    "total_records": 936
+  }
+}
