@@ -22,7 +22,8 @@
   "independent_review": {
     "blockers": 0,
     "major_findings": 0,
-    "reviewers": 2,
+    "method": "two isolated AI-assisted read-only code-review passes followed by main-agent verification",
+    "review_passes": 2,
     "validated_e2e_matrices": {
       "generic_alias_negative_and_positive_pairs": 40,
       "negative_scope_and_restart_boundaries": 28,

@@ -44,7 +44,7 @@ PINNED_V3_POLICY_PLAN_SHA256 = (
     "025a5ed08416bb3b41f6fcd5ecb90e769cc47ead46eb9caf863a6f3b467895d4"
 )
 PINNED_V3_VALIDATION_SHA256 = (
-    "35c509d1a6012f9bd60fbed21bf724223b3886aa3ae48d2fdaccaa8b3937331b"
+    "da2d5d3fef495de1196e95ac456bce7733068de40fbf2ec971eee4c3266184f0"
 )
 PINNED_V3_HARDENING_COMMIT = "482b94eea78ac198f2abbfac5f2f16da02fb7b9e"
 
@@ -1129,7 +1129,12 @@ def _verify_v3(case_dir: Path) -> dict[str, object]:
         validation.get("independent_review"),
         "v3 independent review",
     )
-    _require(review.get("reviewers") == 2, "v3 independent-review count changed")
+    _require(review.get("review_passes") == 2, "v3 independent-review count changed")
+    _require(
+        review.get("method")
+        == "two isolated AI-assisted read-only code-review passes followed by main-agent verification",
+        "v3 independent-review method changed",
+    )
     _require(review.get("blockers") == 0, "v3 independent review contains a blocker")
     _require(
         review.get("major_findings") == 0,
