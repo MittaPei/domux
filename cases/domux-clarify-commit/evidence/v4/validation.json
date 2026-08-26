@@ -1,0 +1,209 @@
+{
+  "analysis_classification": {
+    "confirmatory": false,
+    "held_out": false,
+    "home_assistant_acceptance_rerun": true,
+    "model_rerun": false,
+    "official_v2_replay": false,
+    "stage": "final post-review policy and real-Home-Assistant acceptance closure",
+    "v1_remains_sole_formal": true,
+    "v2_record_remains_immutable": true,
+    "v3_record_remains_immutable": true
+  },
+  "clean_room": {
+    "clone_mode": "local --no-hardlinks, detached at the implementation commit",
+    "dependency_install": false,
+    "fresh_venv": true,
+    "full_tests_passed": 188,
+    "model_rerun": false,
+    "network_used": false,
+    "pip_check": "passed",
+    "python_version": "3.12.12",
+    "source_commit": "80b2b6c9f65f7ba566c4f308cbbc5692636ca26b",
+    "temporary_directory_removed": true,
+    "v1_reproduction": "byte_identical",
+    "v2_reproduction": "byte_identical",
+    "verifier": "passed",
+    "worktree_dirty_entries_after": 0
+  },
+  "evidence_version": "v4-submission-readiness-closure",
+  "home_assistant_acceptance": {
+    "after_drift_state_digest": "80e68977cce90ffd209341d5cdd5fb029c287f2cc719802fd12abbc6ec6a7f06",
+    "case_count": 4,
+    "drift_sut_dispatch_delta": 0,
+    "evidence_generated_after_bound_sources": true,
+    "external_fault_injection": 1,
+    "image": "ghcr.io/home-assistant/home-assistant:2026.8.3",
+    "prepared_state_digest": "bf343f777d3bbb8d7dd36a3d821f5e3c2f206a0d4f7fcfe54da9b043ec6ce7a4",
+    "rejected_before_dispatch": 1,
+    "result": "passed",
+    "schema_version": 2,
+    "setup_direct_rest": 4,
+    "successful_transitions": 3,
+    "sut_dispatch_total": 3,
+    "total_service_calls": 8
+  },
+  "implementation_commit": {
+    "sha": "80b2b6c9f65f7ba566c4f308cbbc5692636ca26b",
+    "signed_off_by": "MittaPei <315415437+MittaPei@users.noreply.github.com>",
+    "subject": "fix: close correction and state-drift gaps"
+  },
+  "immutable_evidence": {
+    "home_assistant_acceptance_sha256": "4af8c185ff14e8c6d89f4b942ead7bd1f06685c83a8648d0e1d4fed3ad9e7cc3",
+    "v1_manifest_sha256": "5f1c842676a367a9b5ae2cd948239a4f111bf0498e3cc916b57239ea671a9396",
+    "v2_manifest_sha256": "53feda5739aacea28f709e7882f6ca35cdc7c285acddc64de57c78ff54559c08",
+    "v3_validation_sha256": "da2d5d3fef495de1196e95ac456bce7733068de40fbf2ec971eee4c3266184f0"
+  },
+  "independent_review": {
+    "blockers": 0,
+    "major_findings": 0,
+    "method": "three isolated AI-assisted read-only reviews followed by main-agent verification",
+    "review_passes": 3,
+    "scopes": [
+      "correction semantics and adversarial selector bridges",
+      "real Home Assistant target-drift execution, accounting, and cleanup",
+      "staged scope, immutable archives, privacy, credentials, and repository hygiene"
+    ]
+  },
+  "non_claims": [
+    "This validation is not a new model evaluation.",
+    "It does not change, replace, or repair the recorded v1 or v2 metrics.",
+    "The v2 analysis reuses the v1 raw outputs and remains exploratory, not held-out or confirmatory.",
+    "The Home Assistant acceptance uses fixed recorded Domux-output fixtures, not an uninterrupted live model-to-Home-Assistant run.",
+    "Four acceptance cases mean three committed transitions plus one rejection before dispatch, not four committed transitions.",
+    "The state-drift mutation is an out-of-band fault injection and is excluded from the SUT dispatch count.",
+    "The preview is an explanatory infographic, not a terminal screenshot."
+  ],
+  "repository_hygiene": {
+    "lfs_pointer_files": 0,
+    "max_tracked_file_threshold_bytes": 1048576,
+    "model_weight_files": 0,
+    "personal_absolute_path_matches": 0,
+    "private_key_or_token_pattern_files": 0,
+    "result": "passed",
+    "runtime_sensitive_ha_json_keys": 0,
+    "scope": "all 52 tracked case files at the implementation commit and its technical change set",
+    "tracked_files_over_threshold": 0,
+    "unexpected_git_modes": 0
+  },
+  "reproduction_results": {
+    "v1": {
+      "command": "python reproduce_v1.py",
+      "expected_evaluator_exit_code": 1,
+      "files": {
+        "report.json": "edea57b50e0c9ea789ca97252ada87e7064d87b8ac739c0f019519441ed2be97",
+        "trials.jsonl": "c7f0c97943bd49f4c21306eadeb38a69de8b063e0d821d21ee966c03ee287171"
+      },
+      "model_rerun": false,
+      "quality_gate": "fail",
+      "result": "byte_identical"
+    },
+    "v2": {
+      "command": "python reproduce_v2.py",
+      "expected_replay_exit_code": 1,
+      "exploratory_gate": "fail",
+      "files": {
+        "manifest.json": "53feda5739aacea28f709e7882f6ca35cdc7c285acddc64de57c78ff54559c08",
+        "report.json": "b9df72353b2d20125ec75279e686e6316569dcc16b7b3db0666845a04452ebe9",
+        "trials.jsonl": "e7a02a537ccf88afd101172ca2bafd8d3acc077b2030dc03b8ca7b5b1bf2ef5e"
+      },
+      "model_rerun": false,
+      "raw_outputs_reused_from_v1": true,
+      "result": "byte_identical"
+    }
+  },
+  "schema_version": 1,
+  "source_bindings": {
+    "implementation": {
+      "clarify_commit.py": {
+        "sha256": "67e1dff8b413f7dffbd5ef1d826973153b86e35cb0da3b75aeec52d11160eaff",
+        "size_bytes": 226611
+      },
+      "ha_acceptance.py": {
+        "sha256": "842381710891d8e7485cd3b93ccff6e74650c1304d535e9dde34038e029fbc54",
+        "size_bytes": 58472
+      },
+      "reproduce_v2.py": {
+        "sha256": "1ed5902f5bbb7fdefc26cbc7838288c0c8844ab94fbb7c4f04acf02155a5338f",
+        "size_bytes": 4436
+      },
+      "requirements.txt": {
+        "sha256": "0a2d2262cb81ebf03c2c716b682f6a0dcdc183477c4316a161dcb8ec3fea480a",
+        "size_bytes": 238
+      },
+      "tests/test_clarify_commit.py": {
+        "sha256": "47614eeedfd3e731f5cc815e5e7073bb63b544a37c85783bcb799eca2f7bb5c7",
+        "size_bytes": 230906
+      },
+      "tests/test_ha_acceptance.py": {
+        "sha256": "5cf6a842afb89205e844fc48184f46e9d821a621ed87c8e41c198ccf847500c2",
+        "size_bytes": 38918
+      },
+      "tests/test_reproduce_v2.py": {
+        "sha256": "11bc38b8ae171538bf348c01c9055ec484298a070fe25b74d1076334bddc58d6",
+        "size_bytes": 1309
+      }
+    },
+    "presentation": {
+      "preview.png": {
+        "sha256": "27b434d0df05adc92159ebe498b9d7ab964b76905edf22c1346a8e813773cb66",
+        "size_bytes": 225634
+      },
+      "preview.svg": {
+        "sha256": "b96309abc7a2080b27148e6c36edbebc2a72557a01a65bc732607c255dacfa5f",
+        "size_bytes": 10906
+      }
+    },
+    "validation_harness": {
+      "tests/test_verify_artifacts.py": {
+        "sha256": "0f51fd9e6bbb95e52c83c1af8cef7828d1e8ef62ada2ada80c53641eeeb71ec4",
+        "size_bytes": 14724
+      }
+    }
+  },
+  "status": "validated",
+  "validation_date": "2026-08-27",
+  "validation_results": {
+    "artifact_verifier": {
+      "command": "python verify_artifacts.py",
+      "result": "passed"
+    },
+    "case_full_suite": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -q",
+      "passed": 188,
+      "result": "passed"
+    },
+    "diff_check": {
+      "command": "git diff --check && git diff --cached --check",
+      "result": "passed"
+    },
+    "home_assistant_suite": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python -m unittest tests/test_ha_acceptance.py -q",
+      "passed": 13,
+      "result": "passed"
+    },
+    "policy_suite": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python -m unittest tests/test_clarify_commit.py -q",
+      "passed": 108,
+      "result": "passed"
+    },
+    "python_compile": {
+      "command": "python -m py_compile *.py tests/*.py",
+      "result": "passed"
+    },
+    "real_home_assistant": {
+      "case_count": 4,
+      "command": "timeout 900 python ha_acceptance.py --output evidence/ha_acceptance.json",
+      "drift_sut_dispatch_delta": 0,
+      "rejected_before_dispatch": 1,
+      "result": "passed",
+      "successful_transitions": 3,
+      "sut_dispatch_total": 3,
+      "task_resources_after": 0
+    },
+    "ruff": {
+      "command": "python -m ruff check clarify_commit.py ha_acceptance.py reproduce_v1.py reproduce_v2.py verify_artifacts.py tests",
+      "result": "passed"
+    }
+  }
+}

@@ -3,9 +3,9 @@
 
 The verifier intentionally uses only the Python standard library.  It checks
 the frozen v1 model run, the post-formal v2 replay publication, and the pinned
-Home Assistant acceptance record.  It also binds the post-v2 v3 hardening plan,
-validation record, policy, and regression tests without executing the model,
-policy replay, Docker, Home Assistant, or any network operation.
+Home Assistant acceptance record.  It also preserves the historical v3 record
+and binds the final v4 submission-readiness closure without executing the
+model, policy replay, Docker, Home Assistant, or any network operation.
 """
 
 from __future__ import annotations
@@ -50,6 +50,10 @@ PINNED_V3_VALIDATION_SHA256 = (
     "da2d5d3fef495de1196e95ac456bce7733068de40fbf2ec971eee4c3266184f0"
 )
 PINNED_V3_HARDENING_COMMIT = "482b94eea78ac198f2abbfac5f2f16da02fb7b9e"
+PINNED_V4_VALIDATION_SHA256 = (
+    "3966044c0e95a352d839bfa2639f45edd939ed1d9bd3b2e7c715d23beef49455"
+)
+PINNED_V4_IMPLEMENTATION_COMMIT = "80b2b6c9f65f7ba566c4f308cbbc5692636ca26b"
 
 FORMAL_BASE_COUNT = 48
 CONTEXT_BASE_COUNT = 12
@@ -107,6 +111,22 @@ V2_ARCHIVED_SOURCE_FILES = (
     "ha_acceptance.py",
     "tests/test_clarify_commit.py",
     "tests/test_ha_acceptance.py",
+)
+V4_IMPLEMENTATION_SOURCE_FILES = (
+    "clarify_commit.py",
+    "ha_acceptance.py",
+    "reproduce_v2.py",
+    "requirements.txt",
+    "tests/test_clarify_commit.py",
+    "tests/test_ha_acceptance.py",
+    "tests/test_reproduce_v2.py",
+)
+V4_VALIDATION_HARNESS_FILES = ("tests/test_verify_artifacts.py",)
+V4_PRESENTATION_FILES = ("preview.png", "preview.svg")
+V4_SOURCE_FILES = (
+    V4_IMPLEMENTATION_SOURCE_FILES
+    + V4_PRESENTATION_FILES
+    + V4_VALIDATION_HARNESS_FILES
 )
 REPLAY_OUTPUT_NAMES = ("trials.jsonl", "report.json", "manifest.json")
 HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -1377,6 +1397,376 @@ def _verify_v3(case_dir: Path) -> dict[str, object]:
     }
 
 
+def _verify_v4(
+    case_dir: Path,
+    ha_summary: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Verify the final closure while preserving all earlier classifications."""
+
+    validation_payload = _read_pinned(
+        case_dir / "evidence" / "v4" / "validation.json",
+        PINNED_V4_VALIDATION_SHA256,
+        "v4 validation",
+    )
+    validation = _load_json(validation_payload, "v4 validation")
+    _require(
+        set(validation)
+        == {
+            "analysis_classification",
+            "clean_room",
+            "evidence_version",
+            "home_assistant_acceptance",
+            "implementation_commit",
+            "immutable_evidence",
+            "independent_review",
+            "non_claims",
+            "repository_hygiene",
+            "reproduction_results",
+            "schema_version",
+            "source_bindings",
+            "status",
+            "validation_date",
+            "validation_results",
+        },
+        "v4 top-level field set changed",
+    )
+    _require(validation.get("schema_version") == 1, "v4 validation schema changed")
+    _require(validation.get("status") == "validated", "v4 validation did not pass")
+    _require(
+        validation.get("evidence_version") == "v4-submission-readiness-closure",
+        "v4 evidence version changed",
+    )
+    _require(
+        validation.get("validation_date") == "2026-08-27",
+        "v4 validation date changed",
+    )
+
+    classification = _mapping(
+        validation.get("analysis_classification"),
+        "v4 analysis classification",
+    )
+    _require(
+        classification
+        == {
+            "confirmatory": False,
+            "held_out": False,
+            "home_assistant_acceptance_rerun": True,
+            "model_rerun": False,
+            "official_v2_replay": False,
+            "stage": "final post-review policy and real-Home-Assistant acceptance closure",
+            "v1_remains_sole_formal": True,
+            "v2_record_remains_immutable": True,
+            "v3_record_remains_immutable": True,
+        },
+        "v4 analysis classification changed",
+    )
+    commit = _mapping(
+        validation.get("implementation_commit"),
+        "v4 implementation commit",
+    )
+    _require(
+        commit
+        == {
+            "sha": PINNED_V4_IMPLEMENTATION_COMMIT,
+            "signed_off_by": (
+                "MittaPei <315415437+MittaPei@users.noreply.github.com>"
+            ),
+            "subject": "fix: close correction and state-drift gaps",
+        },
+        "v4 implementation commit changed",
+    )
+    immutable = _mapping(
+        validation.get("immutable_evidence"),
+        "v4 immutable evidence",
+    )
+    _require(
+        immutable
+        == {
+            "home_assistant_acceptance_sha256": PINNED_HA_ACCEPTANCE_SHA256,
+            "v1_manifest_sha256": PINNED_V1_MANIFEST_SHA256,
+            "v2_manifest_sha256": PINNED_V2_MANIFEST_SHA256,
+            "v3_validation_sha256": PINNED_V3_VALIDATION_SHA256,
+        },
+        "v4 immutable-evidence binding changed",
+    )
+
+    source_groups = _mapping(validation.get("source_bindings"), "v4 source groups")
+    _require(
+        set(source_groups) == {"implementation", "presentation", "validation_harness"},
+        "v4 source-binding groups changed",
+    )
+    expected_groups = {
+        "implementation": V4_IMPLEMENTATION_SOURCE_FILES,
+        "presentation": V4_PRESENTATION_FILES,
+        "validation_harness": V4_VALIDATION_HARNESS_FILES,
+    }
+    for group_name, source_files in expected_groups.items():
+        bindings = _mapping(source_groups.get(group_name), f"v4 {group_name} bindings")
+        _require(
+            set(bindings) == set(source_files),
+            f"v4 {group_name} source-binding set changed",
+        )
+        for relative in source_files:
+            _verify_binding(
+                _read_bytes(case_dir / relative, f"v4 source {relative}"),
+                bindings[relative],
+                f"v4 source {relative}",
+            )
+
+    expected_results = {
+        "artifact_verifier": {
+            "command": "python verify_artifacts.py",
+            "result": "passed",
+        },
+        "case_full_suite": {
+            "command": (
+                "PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -q"
+            ),
+            "passed": 188,
+            "result": "passed",
+        },
+        "diff_check": {
+            "command": "git diff --check && git diff --cached --check",
+            "result": "passed",
+        },
+        "home_assistant_suite": {
+            "command": (
+                "PYTHONDONTWRITEBYTECODE=1 python -m unittest "
+                "tests/test_ha_acceptance.py -q"
+            ),
+            "passed": 13,
+            "result": "passed",
+        },
+        "policy_suite": {
+            "command": (
+                "PYTHONDONTWRITEBYTECODE=1 python -m unittest "
+                "tests/test_clarify_commit.py -q"
+            ),
+            "passed": 108,
+            "result": "passed",
+        },
+        "python_compile": {
+            "command": "python -m py_compile *.py tests/*.py",
+            "result": "passed",
+        },
+        "real_home_assistant": {
+            "case_count": 4,
+            "command": (
+                "timeout 900 python ha_acceptance.py --output "
+                "evidence/ha_acceptance.json"
+            ),
+            "drift_sut_dispatch_delta": 0,
+            "rejected_before_dispatch": 1,
+            "result": "passed",
+            "successful_transitions": 3,
+            "sut_dispatch_total": 3,
+            "task_resources_after": 0,
+        },
+        "ruff": {
+            "command": (
+                "python -m ruff check clarify_commit.py ha_acceptance.py "
+                "reproduce_v1.py reproduce_v2.py verify_artifacts.py tests"
+            ),
+            "result": "passed",
+        },
+    }
+    results = _mapping(validation.get("validation_results"), "v4 validation results")
+    _require(set(results) == set(expected_results), "v4 validation-result set changed")
+    for name, expected in expected_results.items():
+        _require(
+            _mapping(results.get(name), f"v4 validation result {name}") == expected,
+            (
+                "v4 full-suite result changed"
+                if name == "case_full_suite"
+                else f"v4 validation result changed: {name}"
+            ),
+        )
+
+    clean_room = _mapping(validation.get("clean_room"), "v4 clean-room result")
+    _require(
+        clean_room
+        == {
+            "clone_mode": "local --no-hardlinks, detached at the implementation commit",
+            "dependency_install": False,
+            "fresh_venv": True,
+            "full_tests_passed": 188,
+            "model_rerun": False,
+            "network_used": False,
+            "pip_check": "passed",
+            "python_version": "3.12.12",
+            "source_commit": PINNED_V4_IMPLEMENTATION_COMMIT,
+            "temporary_directory_removed": True,
+            "v1_reproduction": "byte_identical",
+            "v2_reproduction": "byte_identical",
+            "verifier": "passed",
+            "worktree_dirty_entries_after": 0,
+        },
+        "v4 clean-room result changed",
+    )
+    hygiene = _mapping(
+        validation.get("repository_hygiene"),
+        "v4 repository hygiene",
+    )
+    _require(
+        hygiene
+        == {
+            "lfs_pointer_files": 0,
+            "max_tracked_file_threshold_bytes": 1048576,
+            "model_weight_files": 0,
+            "personal_absolute_path_matches": 0,
+            "private_key_or_token_pattern_files": 0,
+            "result": "passed",
+            "runtime_sensitive_ha_json_keys": 0,
+            "scope": (
+                "all 52 tracked case files at the implementation commit and its "
+                "technical change set"
+            ),
+            "tracked_files_over_threshold": 0,
+            "unexpected_git_modes": 0,
+        },
+        "v4 repository-hygiene result changed",
+    )
+
+    expected_reproductions = {
+        "v1": {
+            "command": "python reproduce_v1.py",
+            "expected_evaluator_exit_code": 1,
+            "files": {
+                "report.json": (
+                    "edea57b50e0c9ea789ca97252ada87e7064d87b8ac739c0f019519441ed2be97"
+                ),
+                "trials.jsonl": (
+                    "c7f0c97943bd49f4c21306eadeb38a69de8b063e0d821d21ee966c03ee287171"
+                ),
+            },
+            "model_rerun": False,
+            "quality_gate": "fail",
+            "result": "byte_identical",
+        },
+        "v2": {
+            "command": "python reproduce_v2.py",
+            "expected_replay_exit_code": 1,
+            "exploratory_gate": "fail",
+            "files": {
+                "manifest.json": PINNED_V2_MANIFEST_SHA256,
+                "report.json": (
+                    "b9df72353b2d20125ec75279e686e6316569dcc16b7b3db0666845a04452ebe9"
+                ),
+                "trials.jsonl": (
+                    "e7a02a537ccf88afd101172ca2bafd8d3acc077b2030dc03b8ca7b5b1bf2ef5e"
+                ),
+            },
+            "model_rerun": False,
+            "raw_outputs_reused_from_v1": True,
+            "result": "byte_identical",
+        },
+    }
+    _require(
+        _mapping(validation.get("reproduction_results"), "v4 reproductions")
+        == expected_reproductions,
+        "v4 reproduction result changed",
+    )
+
+    expected_ha = {
+        "after_drift_state_digest": (
+            "80e68977cce90ffd209341d5cdd5fb029c287f2cc719802fd12abbc6ec6a7f06"
+        ),
+        "case_count": 4,
+        "drift_sut_dispatch_delta": 0,
+        "evidence_generated_after_bound_sources": True,
+        "external_fault_injection": 1,
+        "image": "ghcr.io/home-assistant/home-assistant:2026.8.3",
+        "prepared_state_digest": (
+            "bf343f777d3bbb8d7dd36a3d821f5e3c2f206a0d4f7fcfe54da9b043ec6ce7a4"
+        ),
+        "rejected_before_dispatch": 1,
+        "result": "passed",
+        "schema_version": 2,
+        "setup_direct_rest": 4,
+        "successful_transitions": 3,
+        "sut_dispatch_total": 3,
+        "total_service_calls": 8,
+    }
+    ha_record = _mapping(
+        validation.get("home_assistant_acceptance"),
+        "v4 Home Assistant summary",
+    )
+    _require(ha_record == expected_ha, "v4 Home Assistant summary changed")
+    current_ha = dict(ha_summary) if ha_summary is not None else _verify_ha(case_dir)
+    _require(
+        current_ha.get("artifact_sha256") == PINNED_HA_ACCEPTANCE_SHA256
+        and current_ha.get("sut_cases") == ha_record["case_count"]
+        and current_ha.get("successful_transitions")
+        == ha_record["successful_transitions"]
+        and current_ha.get("rejected_before_dispatch")
+        == ha_record["rejected_before_dispatch"]
+        and current_ha.get("sut_dispatch_total") == ha_record["sut_dispatch_total"]
+        and current_ha.get("drift_sut_dispatch_delta")
+        == ha_record["drift_sut_dispatch_delta"],
+        "v4/Home Assistant cross-check changed",
+    )
+
+    review = _mapping(validation.get("independent_review"), "v4 independent review")
+    _require(
+        review
+        == {
+            "blockers": 0,
+            "major_findings": 0,
+            "method": (
+                "three isolated AI-assisted read-only reviews followed by "
+                "main-agent verification"
+            ),
+            "review_passes": 3,
+            "scopes": [
+                "correction semantics and adversarial selector bridges",
+                "real Home Assistant target-drift execution, accounting, and cleanup",
+                (
+                    "staged scope, immutable archives, privacy, credentials, and "
+                    "repository hygiene"
+                ),
+            ],
+        },
+        "v4 independent-review result changed",
+    )
+    expected_non_claims = [
+        "This validation is not a new model evaluation.",
+        "It does not change, replace, or repair the recorded v1 or v2 metrics.",
+        (
+            "The v2 analysis reuses the v1 raw outputs and remains exploratory, "
+            "not held-out or confirmatory."
+        ),
+        (
+            "The Home Assistant acceptance uses fixed recorded Domux-output "
+            "fixtures, not an uninterrupted live model-to-Home-Assistant run."
+        ),
+        (
+            "Four acceptance cases mean three committed transitions plus one "
+            "rejection before dispatch, not four committed transitions."
+        ),
+        (
+            "The state-drift mutation is an out-of-band fault injection and is "
+            "excluded from the SUT dispatch count."
+        ),
+        "The preview is an explanatory infographic, not a terminal screenshot.",
+    ]
+    _require(
+        list(_sequence(validation.get("non_claims"), "v4 non-claims"))
+        == expected_non_claims,
+        "v4 non-claim set changed",
+    )
+    return {
+        "status": "verified",
+        "validation_sha256": PINNED_V4_VALIDATION_SHA256,
+        "implementation_commit": PINNED_V4_IMPLEMENTATION_COMMIT,
+        "policy_tests": 108,
+        "ha_tests": 13,
+        "full_tests": 188,
+        "clean_room_tests": 188,
+        "model_rerun": False,
+        "official_v2_replay": False,
+    }
+
+
 def verify_all(case_dir: Path = CASE_DIR) -> dict[str, object]:
     """Verify all immutable evidence and return a deterministic summary."""
 
@@ -1386,11 +1776,13 @@ def verify_all(case_dir: Path = CASE_DIR) -> dict[str, object]:
     v2 = _verify_v2(case_dir, evaluation)
     ha = _verify_ha(case_dir)
     v3 = _verify_v3(case_dir)
+    v4 = _verify_v4(case_dir, ha)
     return {
         "status": "verified",
         "v1": v1,
         "v2": v2,
         "v3": v3,
+        "v4": v4,
         "home_assistant": ha,
     }
 
