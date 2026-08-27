@@ -93,17 +93,12 @@ The data measures whether a downstream integration:
 
 It is not a general Domux accuracy benchmark and it does not estimate ambiguity
 prevalence in household traffic. It is a deterministic conformance suite for
-the disclosed formal v1 policy. That policy and its report remain frozen after
-formal model inference begins; the raw outputs are never edited, omitted, or
-selectively rerun. A separately versioned v2 may replay all 96 immutable raw
-outputs after inspecting v1 failures only as explicitly labelled,
-failure-driven exploratory hardening. Such a replay cannot replace v1, become a
-held-out result, or support new confirmatory inference.
-
-For squash-merge-safe provenance, `evidence/v1/code/` preserves the exact v1
-policy, evaluator, and model-runner bytes named by the frozen v1 manifest. The
-v2 replay validates those archived hashes and a separate content-addressed v2
-source bundle, so reproduction does not depend on fork-only Git commits.
+the recorded formal v1 run. Its raw model outputs and report are never edited,
+omitted, or selectively rerun. The final top-level integration was improved
+after inspecting the v1 failures, so it is a reference implementation rather
+than a basis for relabelling the original v1 result. The retained scripts can
+run a fresh end-to-end observation; they do not claim byte-identical
+reproduction of the historical v1 policy execution.
 
 ## Safety and privacy
 
