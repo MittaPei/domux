@@ -28,6 +28,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import clarify_commit as clarify_commit_module
 from clarify_commit import (
     DomuxInstruction,
     EntityRegistry,
@@ -73,6 +74,8 @@ SCENARIO_EVIDENCE_PATH = CASE_DIR / "data" / "scenarios.jsonl"
 SCENARIO_EVIDENCE_ARTIFACT = "data/scenarios.jsonl"
 SCENARIO_EVIDENCE_SHA256 = "0e27842c62d9cd4e4b1467b43e3ebcd346c79c0125c4f40cce97d363c821a0a0"
 HA_REGISTRY_PROFILE = "semantic_target_mapping_subset_not_full_scenario_inventory"
+EXECUTION_SOURCE_PATHS = ("clarify_commit.py", "ha_acceptance.py")
+EXECUTION_INPUT_PATHS = ("data/scenarios.jsonl", "evidence/v1/domux_raw.jsonl")
 ENTITY_IDS = {
     "living_room_light": "light.ceiling_lights",
     "study_light": "light.bed_light",
@@ -464,6 +467,109 @@ def _sha256_bytes(value: bytes) -> str:
 
 def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
+
+
+def _stable_file_binding(relative: str) -> dict[str, object]:
+    """Hash one regular, non-symlink case file without a read-time change."""
+
+    path = CASE_DIR / relative
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise AcceptanceError(f"execution file is not regular: {relative}")
+        before = path.stat()
+        payload = path.read_bytes()
+        after = path.stat()
+    except OSError as exc:
+        raise AcceptanceError(f"execution file is unavailable: {relative}") from exc
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_size,
+    )
+    if before_identity != after_identity or len(payload) != after.st_size:
+        raise AcceptanceError(f"execution file changed while hashing: {relative}")
+    return {"sha256": _sha256_bytes(payload), "size_bytes": len(payload)}
+
+
+def _verify_module_origins() -> None:
+    """Reject execution when imported project modules came from another tree."""
+
+    expected = {
+        "clarify_commit.py": getattr(clarify_commit_module, "__file__", None),
+        "ha_acceptance.py": __file__,
+    }
+    for relative, origin in expected.items():
+        if not isinstance(origin, str):
+            raise AcceptanceError(f"execution module origin is unavailable: {relative}")
+        try:
+            resolved = Path(origin).resolve(strict=True)
+            required = (CASE_DIR / relative).resolve(strict=True)
+        except OSError as exc:
+            raise AcceptanceError(
+                f"execution module origin is unavailable: {relative}"
+            ) from exc
+        if resolved != required:
+            raise AcceptanceError(f"execution module origin changed: {relative}")
+
+
+def capture_execution_bindings() -> dict[str, dict[str, dict[str, object]]]:
+    """Capture exact repository inputs and Python sources used by the HA run."""
+
+    groups: dict[str, dict[str, dict[str, object]]] = {}
+    for group_name, relative_paths in (
+        ("inputs", EXECUTION_INPUT_PATHS),
+        ("sources", EXECUTION_SOURCE_PATHS),
+    ):
+        bindings: dict[str, dict[str, object]] = {}
+        for relative in relative_paths:
+            bindings[relative] = _stable_file_binding(relative)
+        groups[group_name] = bindings
+    return groups
+
+
+def finalize_execution_source_bindings(
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+) -> dict[str, object]:
+    """Create provenance only when every execution file stayed byte-stable."""
+
+    if before != after:
+        raise AcceptanceError("execution sources or inputs changed during acceptance")
+    bundle_payload = json.dumps(
+        before,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "binding_bundle_sha256": _sha256_bytes(bundle_payload),
+        "digest_algorithm": "sha256",
+        "host_python": {
+            "implementation": sys.implementation.name,
+            "version": ".".join(str(value) for value in sys.version_info[:3]),
+        },
+        "inputs": dict(before["inputs"]),
+        "module_origins_verified": True,
+        "path_base": "case_directory",
+        "pre_post_execution_match": True,
+        "schema_version": 1,
+        "sources": dict(before["sources"]),
+    }
+
+
+def collect_execution_source_bindings() -> dict[str, object]:
+    """Collect a same-instant binding, primarily for isolated unit checks."""
+
+    _verify_module_origins()
+    bindings = capture_execution_bindings()
+    return finalize_execution_source_bindings(bindings, bindings)
 
 
 def _configured_evidence_keys() -> tuple[DomuxEvidenceKey, ...]:
@@ -2134,6 +2240,8 @@ def execute_acceptance(
     """Run acceptance and always clean exactly the resources owned by this run."""
 
     try:
+        _verify_module_origins()
+        bindings_before = capture_execution_bindings()
         recorded_evidence = recorded_evidence_loader()
         scenario_evidence = scenario_evidence_loader()
         validate_acceptance_evidence(recorded_evidence, scenario_evidence)
@@ -2145,7 +2253,13 @@ def execute_acceptance(
             credential_factory=credential_factory,
             rest_adapter_factory=rest_adapter_factory,
         )
+        bindings_after = capture_execution_bindings()
+        execution_source_bindings = finalize_execution_source_bindings(
+            bindings_before,
+            bindings_after,
+        )
         return {
+            "execution_source_bindings": execution_source_bindings,
             "home_assistant": home_assistant,
             "image": runtime.image,
             "isolation": {
@@ -2157,7 +2271,7 @@ def execute_acceptance(
                 "random_loopback_binding": True,
                 "restart_policy": "no",
             },
-            "schema_version": 3,
+            "schema_version": 4,
             "status": "passed",
         }
     finally:

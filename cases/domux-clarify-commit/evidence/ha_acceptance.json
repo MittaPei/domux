@@ -1,4 +1,36 @@
 {
+  "execution_source_bindings": {
+    "binding_bundle_sha256": "9359a27e970603a1635d1c6307b5bbd651bda86a70ab6098a189c7bdce4d5fa1",
+    "digest_algorithm": "sha256",
+    "host_python": {
+      "implementation": "cpython",
+      "version": "3.12.12"
+    },
+    "inputs": {
+      "data/scenarios.jsonl": {
+        "sha256": "0e27842c62d9cd4e4b1467b43e3ebcd346c79c0125c4f40cce97d363c821a0a0",
+        "size_bytes": 161098
+      },
+      "evidence/v1/domux_raw.jsonl": {
+        "sha256": "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966",
+        "size_bytes": 49637
+      }
+    },
+    "module_origins_verified": true,
+    "path_base": "case_directory",
+    "pre_post_execution_match": true,
+    "schema_version": 1,
+    "sources": {
+      "clarify_commit.py": {
+        "sha256": "67e1dff8b413f7dffbd5ef1d826973153b86e35cb0da3b75aeec52d11160eaff",
+        "size_bytes": 226611
+      },
+      "ha_acceptance.py": {
+        "sha256": "4820b87a784e5a63de27ae536d747666b65678e22578397a8483dcd30336a75a",
+        "size_bytes": 88780
+      }
+    }
+  },
   "home_assistant": {
     "auth": {
       "issue_http": 200,
@@ -613,6 +645,6 @@
     "random_loopback_binding": true,
     "restart_policy": "no"
   },
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "passed"
 }

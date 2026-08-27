@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
   <title id="title">Clarify, Bind, Commit — Domux safety integration evidence</title>
-  <desc id="desc">A five-step fail-closed execution pipeline and honest v1, v2, Home Assistant, and v4 validation results.</desc>
+  <desc id="desc">A five-step fail-closed execution pipeline with formal v1, post-formal diagnostics, provenance-bound Home Assistant schema 4, and v5 correction results.</desc>
   <defs>
     <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0%" stop-color="#172554"/>
@@ -106,8 +106,8 @@
     <text x="205" y="646" class="sans body">paired discrimination</text>
     <text x="88" y="686" class="sans metric">42/48</text>
     <text x="205" y="686" class="sans body">B2 guarded exact delta</text>
-    <text x="88" y="726" class="sans metric">0/48</text>
-    <text x="205" y="726" class="sans body">wrong-target transitions</text>
+    <text x="88" y="726" class="sans metric">1/48</text>
+    <text x="205" y="726" class="sans body">B0 unique-or-abstain dispatch</text>
     <text x="88" y="764" class="sans small">Median 638.807 ms · p95 922.706 ms</text>
     <rect x="367" y="775" width="125" height="32" rx="16" fill="#fee2e2"/>
     <text x="429" y="797" text-anchor="middle" class="sans" font-size="17" font-weight="800" fill="#b91c1c">GATE: FAIL</text>
@@ -115,45 +115,45 @@
 
   <g filter="url(#shadow)">
     <rect x="570" y="428" width="460" height="390" rx="24" fill="#ffffff" stroke="#fed7aa" stroke-width="2"/>
-    <text x="598" y="467" class="sans label" fill="#b45309">EXPLORATORY, POST-FORMAL</text>
-    <text x="598" y="507" class="sans panel-title">v2 · same 96 raw outputs</text>
-    <text x="598" y="546" class="sans body">936 replay records · no model rerun</text>
+    <text x="598" y="467" class="sans label" fill="#b45309">DIAGNOSTIC, POST-FORMAL</text>
+    <text x="598" y="507" class="sans panel-title">D0 first-match + v2 repair</text>
+    <text x="598" y="546" class="sans body">Frozen v1 outputs · no model rerun</text>
     <line x1="598" y1="565" x2="1002" y2="565" stroke="#e2e8f0" stroke-width="2"/>
-    <text x="598" y="606" class="sans metric">48/48</text>
-    <text x="715" y="606" class="sans body">paired discrimination</text>
-    <text x="598" y="646" class="sans metric">48/48</text>
-    <text x="715" y="646" class="sans body">candidate coverage</text>
-    <text x="598" y="686" class="sans metric">47/48</text>
-    <text x="715" y="686" class="sans body">B2 guarded exact delta</text>
-    <text x="598" y="726" class="sans metric">11/12</text>
-    <text x="715" y="726" class="sans body">context-state guard</text>
-    <text x="598" y="764" class="sans small">Remaining failure retained in denominator</text>
-    <rect x="877" y="775" width="125" height="32" rx="16" fill="#ffedd5"/>
-    <text x="939" y="797" text-anchor="middle" class="sans" font-size="17" font-weight="800" fill="#b45309">GATE: FAIL</text>
+    <text x="598" y="602" class="sans metric">32/48</text>
+    <text x="715" y="602" class="sans body">D0 bases with any call</text>
+    <text x="598" y="638" class="sans metric">16/48</text>
+    <text x="715" y="638" class="sans body">D0 exact target delta</text>
+    <text x="598" y="674" class="sans metric">13/48</text>
+    <text x="715" y="674" class="sans body">D0 wrong-target transitions</text>
+    <text x="598" y="710" class="sans metric">3/48</text>
+    <text x="715" y="710" class="sans body">D0 multi-call bases</text>
+    <text x="598" y="746" class="sans metric">47/48</text>
+    <text x="715" y="746" class="sans body">v2 B2 guarded exact delta</text>
+    <text x="598" y="782" class="sans" font-size="16" fill="#475569">D0 is not formal B0 · v2 gate still fails</text>
   </g>
 
   <g filter="url(#shadow)">
     <rect x="1080" y="428" width="460" height="390" rx="24" fill="#ffffff" stroke="#bbf7d0" stroke-width="2"/>
-    <text x="1108" y="467" class="sans label" fill="#15803d">INTEGRATION + HARDENING</text>
-    <text x="1108" y="507" class="sans panel-title">HA acceptance and v4</text>
-    <text x="1108" y="546" class="sans body">Real HA REST · pinned · offline-verifiable</text>
+    <text x="1108" y="467" class="sans label" fill="#15803d">PROVENANCE-BOUND ACCEPTANCE</text>
+    <text x="1108" y="507" class="sans panel-title">Real HA · schema 4 + v5</text>
+    <text x="1108" y="546" class="sans body">4 v1 pairs + 4 frozen scenario rows</text>
     <line x1="1108" y1="565" x2="1512" y2="565" stroke="#e2e8f0" stroke-width="2"/>
     <text x="1108" y="602" class="sans metric">3/3</text>
     <text x="1204" y="602" class="sans body">exact HA transitions</text>
     <text x="1108" y="638" class="sans metric">1/1</text>
     <text x="1204" y="638" class="sans body">state-drift rejection</text>
     <text x="1108" y="674" class="sans metric">0</text>
-    <text x="1204" y="674" class="sans small">SUT dispatches after replay/drift</text>
-    <text x="1108" y="710" class="sans metric">108</text>
-    <text x="1204" y="710" class="sans body">policy tests passed</text>
-    <text x="1108" y="746" class="sans metric">188</text>
-    <text x="1204" y="746" class="sans body">full case tests passed</text>
-    <text x="1108" y="782" class="sans" font-size="16" fill="#475569">External drift injection excluded from SUT count</text>
+    <text x="1204" y="674" class="sans small">extra SUT calls after replay/drift</text>
+    <text x="1108" y="710" class="sans metric">9</text>
+    <text x="1204" y="710" class="sans body">5 setup + 3 SUT + 1 fault</text>
+    <text x="1108" y="746" class="sans metric">2×</text>
+    <text x="1204" y="746" class="sans small">recorded HA runs · same artifact SHA</text>
+    <text x="1108" y="782" class="sans" font-size="16" fill="#475569">4 runtime bindings · pre/post stable · mapped subset</text>
   </g>
 
   <rect x="60" y="858" width="1480" height="92" rx="22" fill="#e2e8f0"/>
   <text x="86" y="892" class="sans" font-size="19" font-weight="800" fill="#0f172a">PINNED RUN</text>
   <text x="226" y="892" class="sans small">HF revision 6c71a32f… · full BF16 snapshot 10.28 GB · A800 80 GB · 2 independent warm-ups excluded</text>
   <text x="86" y="928" class="sans" font-size="19" font-weight="800" fill="#991b1b">BOUNDARY</text>
-  <text x="226" y="928" class="sans small">v1 is the sole formal result. v2/v3/v4 are post-formal diagnostics; none of these results certifies production safety.</text>
+  <text x="226" y="928" class="sans small">v1 is sole formal. D0/v2 are post-formal; HA is not a live model-to-HA run. No production-safety claim.</text>
 </svg>

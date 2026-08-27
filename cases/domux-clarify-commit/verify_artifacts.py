@@ -3,10 +3,11 @@
 
 The verifier intentionally uses only the Python standard library.  It checks
 the frozen v1 model run, the post-formal v2 replay publication, and the pinned
-Home Assistant acceptance record.  It also preserves the historical v3 record
-and binds the final v4 submission-readiness closure without executing the
-model, Docker, Home Assistant, or any network operation.  The post-formal
-first-match diagnostic is deterministically rebuilt with its pinned v1 code.
+Home Assistant acceptance record.  It preserves the historical v3/v4 records
+and verifies the non-circular v5 provenance correction and current-acceptance
+closure without executing the model, Docker, Home Assistant, or any network
+operation.  The post-formal first-match diagnostic is deterministically rebuilt
+with its pinned v1 code.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ PINNED_V4_HA_ACCEPTANCE_SHA256 = (
     "4af8c185ff14e8c6d89f4b942ead7bd1f06685c83a8648d0e1d4fed3ad9e7cc3"
 )
 PINNED_HA_ACCEPTANCE_SHA256 = (
-    "7bb74408f84765f22e24dcb3863ba150d9f5797ec369792adedb93e7c8f10346"
+    "aa5a70e5d19a0cd90fd673e3f19224231da086dff766ee05aaead8141a6017f0"
 )
 PINNED_V1_DOMUX_RAW_SHA256 = (
     "c0561bc72042dc7415d322fea90649866355dc44d2547f246d87cd87d367e966"
@@ -153,6 +154,58 @@ V4_ARCHIVED_SOURCE_PATHS = {
     ),
     "tests/test_verify_artifacts.py": (
         "evidence/v4/code/tests/test_verify_artifacts.py"
+    ),
+}
+V5_IMPLEMENTATION_COMMIT = "a11155b47941f39d9bd387a902f43147aa29df48"
+V5_IMPLEMENTATION_IDENTITY = (
+    "MittaPei <315415437+MittaPei@users.noreply.github.com>"
+)
+V5_FINAL_FULL_TEST_COUNT = 221
+V5_FINAL_VERIFIER_TEST_COUNT = 31
+V5_STATUS_SCOPE = "evidence_integrity_and_current_claim_semantics_only"
+V5_SOURCE_GROUPS = {
+    "current_policy": (
+        "clarify_commit.py",
+        "tests/test_clarify_commit.py",
+    ),
+    "current_home_assistant": (
+        "ha_acceptance.py",
+        "tests/test_ha_acceptance.py",
+        "evidence/ha_acceptance.json",
+    ),
+    "ha_provenance_inputs": (
+        "data/scenarios.jsonl",
+        "evidence/v1/domux_raw.jsonl",
+        "evidence/v1/manifest.json",
+    ),
+    "post_formal_diagnostic": (
+        "diagnose_first_match_v1.py",
+        "tests/test_diagnose_first_match_v1.py",
+        "evidence/diagnostics/v1_first_match.json",
+    ),
+    "reproduction_harness": (
+        "reproduce_v1.py",
+        "tests/test_reproduce_v1.py",
+        "reproduce_v2.py",
+        "tests/test_reproduce_v2.py",
+    ),
+    "validation_harness": (
+        "verify_artifacts.py",
+        "tests/test_verify_artifacts.py",
+        "requirements.txt",
+    ),
+    "presentation": (
+        "preview.svg",
+        "preview.png",
+    ),
+    "historical_v4_archive": (
+        "evidence/v4/validation.json",
+        "evidence/v4/ha_acceptance.json",
+        "evidence/v4/code/ha_acceptance.py",
+        "evidence/v4/code/tests/test_ha_acceptance.py",
+        "evidence/v4/code/tests/test_verify_artifacts.py",
+        "evidence/v4/presentation/preview.svg",
+        "evidence/v4/presentation/preview.png",
     ),
 }
 REPLAY_OUTPUT_NAMES = ("trials.jsonl", "report.json", "manifest.json")
@@ -1480,11 +1533,27 @@ def _verify_v1_first_match_diagnostic(
         "v1 first-match diagnostic differs from its deterministic rebuild",
     )
     return {
+        "analysis_class": "post_formal_diagnostic_only",
         "status": "verified",
         "artifact_sha256": PINNED_V1_FIRST_MATCH_DIAGNOSTIC_SHA256,
         "base_count": len(verified_trials),
+        "bases_with_any_sut_call": count_expectations["bases_with_any_sut_call"],
+        "diagnostic_arm": "D0_post_formal_naive_first_match",
         "exact_delta_successes": count_expectations["exact_delta_success"],
+        "formal_arm": ARMS[0],
+        "formal_equivalent_dispatch_coverage": count_expectations[
+            "formal_equivalent_dispatch_coverage"
+        ],
+        "formal_protocol_changed": False,
+        "multiple_sut_calls": count_expectations["multiple_sut_calls"],
         "wrong_target_transitions": count_expectations["wrong_target_transition"],
+        "order_sensitive_candidate_sets": count_expectations[
+            "order_sensitive_candidate_set"
+        ],
+        "structurally_parseable": count_expectations[
+            "structurally_parseable_output"
+        ],
+        "total_sut_calls": post["total_sut_calls"],
         "model_calls": 0,
         "formal_metrics_changed": False,
     }
@@ -2041,6 +2110,111 @@ def _verify_ha_scenario_provenance(
     used_base_ids.add(base_id)
 
 
+def _verify_ha_execution_provenance(
+    case_dir: Path,
+    raw_provenance: object,
+) -> dict[str, object]:
+    """Bind the recorded HA run to its exact local sources and input bytes."""
+
+    provenance = _mapping(raw_provenance, "HA execution provenance")
+    _require(
+        set(provenance)
+        == {
+            "binding_bundle_sha256",
+            "digest_algorithm",
+            "host_python",
+            "inputs",
+            "module_origins_verified",
+            "path_base",
+            "pre_post_execution_match",
+            "schema_version",
+            "sources",
+        },
+        "HA execution provenance fields changed",
+    )
+    _require(
+        provenance.get("schema_version") == 1
+        and provenance.get("digest_algorithm") == "sha256"
+        and provenance.get("path_base") == "case_directory"
+        and provenance.get("module_origins_verified") is True
+        and provenance.get("pre_post_execution_match") is True,
+        "HA execution provenance contract changed",
+    )
+    _require(
+        _mapping(provenance.get("host_python"), "HA host Python")
+        == {"implementation": "cpython", "version": "3.12.12"},
+        "HA host Python changed",
+    )
+    expected_groups = {
+        "inputs": ("data/scenarios.jsonl", "evidence/v1/domux_raw.jsonl"),
+        "sources": ("clarify_commit.py", "ha_acceptance.py"),
+    }
+    verified_groups: dict[str, dict[str, Mapping[str, object]]] = {}
+    for group_name, expected_paths in expected_groups.items():
+        binding_kind = {"inputs": "input", "sources": "source"}[group_name]
+        group = _mapping(
+            provenance.get(group_name),
+            f"HA execution {group_name}",
+        )
+        _require(
+            set(group) == set(expected_paths),
+            f"HA execution {group_name} set changed",
+        )
+        verified_group: dict[str, Mapping[str, object]] = {}
+        for relative in expected_paths:
+            binding = _mapping(
+                group.get(relative),
+                f"HA execution {binding_kind} {relative} binding",
+            )
+            _require(
+                set(binding) == {"sha256", "size_bytes"},
+                f"HA execution {binding_kind} {relative} binding fields changed",
+            )
+            source = _read_bytes(
+                case_dir / relative,
+                f"HA execution {binding_kind} {relative}",
+            )
+            _verify_binding(
+                source,
+                binding,
+                f"HA execution {binding_kind} {relative}",
+            )
+            verified_group[relative] = binding
+        verified_groups[group_name] = verified_group
+    _require(
+        verified_groups["inputs"]["data/scenarios.jsonl"].get("sha256")
+        == PINNED_SCENARIO_EVIDENCE_SHA256
+        and verified_groups["inputs"]["evidence/v1/domux_raw.jsonl"].get(
+            "sha256"
+        )
+        == PINNED_V1_DOMUX_RAW_SHA256,
+        "HA execution input digest disagrees with pinned evidence",
+    )
+    bundle_sha256 = _require_digest(
+        provenance.get("binding_bundle_sha256"),
+        "HA execution binding bundle",
+    )
+    _require(
+        bundle_sha256
+        == _sha256(
+            canonical_json(
+                {
+                    "inputs": verified_groups["inputs"],
+                    "sources": verified_groups["sources"],
+                }
+            ).encode("utf-8")
+        ),
+        "HA execution binding bundle digest changed",
+    )
+    return {
+        "binding_bundle_sha256": bundle_sha256,
+        "binding_count": sum(len(group) for group in verified_groups.values()),
+        "groups": verified_groups,
+        "input_count": len(verified_groups["inputs"]),
+        "source_count": len(verified_groups["sources"]),
+    }
+
+
 def _verify_ha(case_dir: Path) -> dict[str, object]:
     payload = _read_pinned(
         case_dir / "evidence" / "ha_acceptance.json",
@@ -2049,12 +2223,24 @@ def _verify_ha(case_dir: Path) -> dict[str, object]:
     )
     evidence = _load_json(payload, "Home Assistant acceptance")
     _require(
-        set(evidence) == {"home_assistant", "image", "isolation", "schema_version", "status"},
+        set(evidence)
+        == {
+            "execution_source_bindings",
+            "home_assistant",
+            "image",
+            "isolation",
+            "schema_version",
+            "status",
+        },
         "HA acceptance top-level fields changed",
     )
     _require(
-        evidence.get("schema_version") == 3 and evidence.get("status") == "passed",
+        evidence.get("schema_version") == 4 and evidence.get("status") == "passed",
         "HA acceptance did not pass",
+    )
+    execution = _verify_ha_execution_provenance(
+        case_dir,
+        evidence.get("execution_source_bindings"),
     )
     image = _mapping(evidence.get("image"), "HA image")
     _require(
@@ -2594,6 +2780,11 @@ def _verify_ha(case_dir: Path) -> dict[str, object]:
         "artifact_sha256": PINNED_HA_ACCEPTANCE_SHA256,
         "domux_evidence_pairs": len(used_keys),
         "drift_sut_dispatch_delta": rejection["sut_dispatch_delta"],
+        "execution_binding_count": execution["binding_count"],
+        "execution_source_binding_groups": execution["groups"],
+        "execution_source_bundle_sha256": execution["binding_bundle_sha256"],
+        "execution_source_count": execution["source_count"],
+        "execution_input_count": execution["input_count"],
         "image_version": image["version"],
         "rejected_before_dispatch": 1,
         "successful_transitions": 3,
@@ -3323,7 +3514,8 @@ def _verify_v4(case_dir: Path) -> dict[str, object]:
         "v4 non-claim set changed",
     )
     return {
-        "status": "verified",
+        "artifact_status": "historical_bytes_verified",
+        "current_claim_status": "superseded_by_v5",
         "validation_sha256": PINNED_V4_VALIDATION_SHA256,
         "implementation_commit": PINNED_V4_IMPLEMENTATION_COMMIT,
         "policy_tests": 108,
@@ -3332,6 +3524,838 @@ def _verify_v4(case_dir: Path) -> dict[str, object]:
         "clean_room_tests": 188,
         "model_rerun": False,
         "official_v2_replay": False,
+    }
+
+
+def _verify_v5(
+    case_dir: Path,
+    *,
+    v1: Mapping[str, object],
+    diagnostic: Mapping[str, object],
+    v2: Mapping[str, object],
+    v3: Mapping[str, object],
+    v4: Mapping[str, object],
+    ha: Mapping[str, object],
+) -> dict[str, object]:
+    """Verify the non-circular v5 correction and current-acceptance closure."""
+
+    payload = _read_bytes(
+        case_dir / "evidence" / "v5" / "validation.json",
+        "v5 validation",
+    )
+    validation = _load_json(payload, "v5 validation")
+    _require(
+        set(validation)
+        == {
+            "analysis_classification",
+            "clean_room",
+            "corrections",
+            "evidence_version",
+            "home_assistant_acceptance",
+            "implementation_commit",
+            "immutable_evidence",
+            "independent_review",
+            "non_claims",
+            "post_formal_diagnostic",
+            "record_classification",
+            "repository_hygiene",
+            "reproduction_results",
+            "schema_version",
+            "source_bindings",
+            "status",
+            "trust_model",
+            "validation_date",
+            "validation_results",
+        },
+        "v5 top-level field set changed",
+    )
+    _require(validation.get("schema_version") == 1, "v5 validation schema changed")
+    _require(validation.get("status") == "validated", "v5 validation did not pass")
+    _require(
+        validation.get("evidence_version")
+        == "v5-provenance-correction-and-current-acceptance-closure",
+        "v5 evidence version changed",
+    )
+    _require(
+        validation.get("validation_date") == "2026-08-27",
+        "v5 validation date changed",
+    )
+
+    expected_analysis = {
+        "stage": (
+            "v4 provenance correction and current real-Home-Assistant "
+            "acceptance closure"
+        ),
+        "formal": False,
+        "confirmatory": False,
+        "held_out": False,
+        "model_rerun": False,
+        "official_v2_replay": False,
+        "current_home_assistant_acceptance_rerun": True,
+        "v1_remains_sole_formal": True,
+        "v2_record_remains_immutable": True,
+        "v3_record_remains_immutable": True,
+        "v4_record_remains_immutable": True,
+    }
+    _require(
+        _mapping(
+            validation.get("analysis_classification"),
+            "v5 analysis classification",
+        )
+        == expected_analysis,
+        "v5 analysis classification changed",
+    )
+
+    expected_commit = {
+        "sha": V5_IMPLEMENTATION_COMMIT,
+        "subject": "test: bind recorded outputs to real HA acceptance",
+        "author": V5_IMPLEMENTATION_IDENTITY,
+        "dco_signed_off_by": V5_IMPLEMENTATION_IDENTITY,
+        "role": (
+            "pre-v5 closure implementation baseline; current closure changes "
+            "are trusted by the outer root"
+        ),
+    }
+    _require(
+        _mapping(validation.get("implementation_commit"), "v5 implementation commit")
+        == expected_commit,
+        "v5 implementation commit changed",
+    )
+    expected_trust = {
+        "outer_root": "git_commit_containing_this_manifest",
+        "outer_root_sha_embedded": False,
+        "manifest_self_hash_embedded": False,
+        "verifier_hardcodes_v5_manifest_sha256": False,
+        "manifest_binds_verifier_and_tests": True,
+        "source_identity": "per-file SHA-256 and byte size",
+        "dco_signed_off_by": V5_IMPLEMENTATION_IDENTITY,
+        "cryptographic_commit_signature_claimed": False,
+        "content_binding_verification_survives_squash": True,
+        "historical_commit_reachability_survives_squash": False,
+        "historical_commit_reachability_note": (
+            "implementation and clean-room commit hashes are historical "
+            "references; a squash merge need not preserve upstream ancestry "
+            "or long-term reachability"
+        ),
+    }
+    _require(
+        _mapping(validation.get("trust_model"), "v5 trust model")
+        == expected_trust,
+        "v5 trust model or circularity declaration changed",
+    )
+
+    expected_records = {
+        "v1": {
+            "analysis_role": "sole_formal_pre_remediation_evaluation",
+            "artifact_status": "frozen_bytes_verified",
+            "result_status": "quality_gate_failed",
+            "current_claim_status": "unchanged",
+        },
+        "v2": {
+            "analysis_role": "post_formal_exploratory_replay",
+            "artifact_status": "immutable_bytes_verified",
+            "result_status": "exploratory_gate_failed",
+            "current_claim_status": "unchanged",
+        },
+        "v3": {
+            "analysis_role": "post_v2_hardening",
+            "artifact_status": "historical_bytes_verified",
+            "current_claim_status": "historical",
+        },
+        "v4": {
+            "analysis_role": "historical_submission_readiness_closure",
+            "artifact_status": "historical_bytes_verified",
+            "current_claim_status": "superseded_by_v5",
+        },
+        "post_formal_diagnostic": {
+            "analysis_role": "post_formal_diagnostic_only",
+            "artifact_status": "deterministically_rebuilt",
+            "formal_metrics_changed": False,
+        },
+        "current_home_assistant": {
+            "analysis_role": "real_home_assistant_acceptance",
+            "artifact_status": "current_acceptance_verified",
+            "formal_model_result": False,
+        },
+        "v5": {
+            "analysis_role": "current_provenance_correction_and_closure",
+            "artifact_status": "current_closure_verified",
+            "current_claim_status": "authoritative_current_closure",
+        },
+    }
+    records = _mapping(
+        validation.get("record_classification"),
+        "v5 record classification",
+    )
+    _require(records == expected_records, "v5 record classification changed")
+    _require(
+        v1.get("status") == "verified"
+        and v2.get("exploratory_gate") == "fail"
+        and v3.get("status") == "verified"
+        and v4.get("artifact_status") == "historical_bytes_verified"
+        and v4.get("current_claim_status") == "superseded_by_v5",
+        "v5 record classification disagrees with verified records",
+    )
+
+    expected_correction = {
+        "correction_id": "v4-ha-provenance-001",
+        "supersedes": {
+            "record": "evidence/v4/validation.json",
+            "record_sha256": PINNED_V4_VALIDATION_SHA256,
+            "json_pointer": "/non_claims/3",
+            "statement_sha256": (
+                "d27d256dc6a4680c401d8ab30491234b8e11567f220c458a3807aab700622c08"
+            ),
+        },
+        "historical_record_bytes_mutated": False,
+        "historical_evidence_status": "historical_bytes_verified",
+        "current_claim_status": "superseded_by_v5",
+        "reason": (
+            "The v4 record did not establish an exact source binding from its "
+            "Home Assistant requests to immutable v1 model records or bind its "
+            "clarification follow-up to frozen scenario data."
+        ),
+        "replacement_claim": (
+            "The current schema-4 Home Assistant record verifies module origins "
+            "and matching pre/post bindings for its exact runner, policy, and two "
+            "frozen inputs. It verifies four exact v1 command/raw-output pairs. "
+            "The clarified case obtains its answer and confirmed instruction "
+            "from frozen synthetic scenario gold, makes no post-clarification "
+            "model call, and uses an explicitly declared semantic target-mapping "
+            "subset rather than the full frozen scenario inventory. It is not an "
+            "uninterrupted live model-to-Home-Assistant run."
+        ),
+    }
+    corrections = list(_sequence(validation.get("corrections"), "v5 corrections"))
+    _require(corrections == [expected_correction], "v5 correction changed")
+    v4_payload = _read_pinned(
+        case_dir / "evidence" / "v4" / "validation.json",
+        PINNED_V4_VALIDATION_SHA256,
+        "v5 superseded v4 validation",
+    )
+    v4_validation = _load_json(v4_payload, "v5 superseded v4 validation")
+    v4_non_claims = _sequence(v4_validation.get("non_claims"), "v4 non-claims")
+    _require(len(v4_non_claims) > 3, "v5 correction JSON pointer is unavailable")
+    superseded_statement = v4_non_claims[3]
+    _require(
+        isinstance(superseded_statement, str)
+        and _sha256(superseded_statement.encode("utf-8"))
+        == expected_correction["supersedes"]["statement_sha256"],
+        "v5 correction statement binding changed",
+    )
+
+    expected_immutable = {
+        "v1": {
+            "artifact": "evidence/v1/manifest.json",
+            "sha256": PINNED_V1_MANIFEST_SHA256,
+        },
+        "v2": {
+            "artifact": "evidence/v2/manifest.json",
+            "sha256": PINNED_V2_MANIFEST_SHA256,
+        },
+        "v3": {
+            "artifact": "evidence/v3/validation.json",
+            "sha256": PINNED_V3_VALIDATION_SHA256,
+        },
+        "v4": {
+            "artifact": "evidence/v4/validation.json",
+            "sha256": PINNED_V4_VALIDATION_SHA256,
+        },
+        "post_formal_diagnostic": {
+            "artifact": "evidence/diagnostics/v1_first_match.json",
+            "sha256": PINNED_V1_FIRST_MATCH_DIAGNOSTIC_SHA256,
+        },
+        "current_home_assistant": {
+            "artifact": "evidence/ha_acceptance.json",
+            "sha256": PINNED_HA_ACCEPTANCE_SHA256,
+        },
+    }
+    immutable = _mapping(
+        validation.get("immutable_evidence"),
+        "v5 immutable evidence",
+    )
+    _require(immutable == expected_immutable, "v5 immutable evidence changed")
+    _require(
+        v1.get("manifest_sha256") == PINNED_V1_MANIFEST_SHA256
+        and v2.get("manifest_sha256") == PINNED_V2_MANIFEST_SHA256
+        and v3.get("validation_sha256") == PINNED_V3_VALIDATION_SHA256
+        and v4.get("validation_sha256") == PINNED_V4_VALIDATION_SHA256
+        and diagnostic.get("artifact_sha256")
+        == PINNED_V1_FIRST_MATCH_DIAGNOSTIC_SHA256
+        and ha.get("artifact_sha256") == PINNED_HA_ACCEPTANCE_SHA256,
+        "v5 immutable evidence disagrees with verified artifacts",
+    )
+
+    source_groups = _mapping(validation.get("source_bindings"), "v5 source groups")
+    _require(
+        set(source_groups) == set(V5_SOURCE_GROUPS),
+        "v5 source-binding groups changed",
+    )
+    bound_payloads: dict[str, bytes] = {}
+    bound_paths: list[str] = []
+    for group_name, expected_paths in V5_SOURCE_GROUPS.items():
+        group = _mapping(
+            source_groups.get(group_name),
+            f"v5 {group_name} source bindings",
+        )
+        _require(
+            set(group) == set(expected_paths),
+            f"v5 {group_name} source-binding set changed",
+        )
+        for relative in expected_paths:
+            path = Path(relative)
+            _require(
+                not path.is_absolute() and ".." not in path.parts,
+                f"v5 source path is not repository-relative: {relative}",
+            )
+            binding = _mapping(
+                group.get(relative),
+                f"v5 source {relative} binding",
+            )
+            _require(
+                set(binding) == {"sha256", "size_bytes"},
+                f"v5 source {relative} binding fields changed",
+            )
+            source = _read_bytes(case_dir / path, f"v5 source {relative}")
+            _verify_binding(source, binding, f"v5 source {relative}")
+            bound_payloads[relative] = source
+            bound_paths.append(relative)
+    _require(
+        len(bound_paths) == len(set(bound_paths)),
+        "v5 source bindings contain a duplicate path",
+    )
+    _require(
+        "evidence/v5/validation.json" not in bound_paths,
+        "v5 manifest must not bind its own bytes",
+    )
+    expected_execution_groups = {
+        "inputs": {
+            "data/scenarios.jsonl": source_groups["ha_provenance_inputs"][
+                "data/scenarios.jsonl"
+            ],
+            "evidence/v1/domux_raw.jsonl": source_groups[
+                "ha_provenance_inputs"
+            ]["evidence/v1/domux_raw.jsonl"],
+        },
+        "sources": {
+            "clarify_commit.py": source_groups["current_policy"][
+                "clarify_commit.py"
+            ],
+            "ha_acceptance.py": source_groups["current_home_assistant"][
+                "ha_acceptance.py"
+            ],
+        },
+    }
+    _require(
+        _mapping(
+            ha.get("execution_source_binding_groups"),
+            "verified HA execution binding groups",
+        )
+        == expected_execution_groups,
+        "v5/HA/tree execution bindings disagree",
+    )
+
+    ha_payload = _read_bytes(
+        case_dir / "evidence" / "ha_acceptance.json",
+        "v5 current Home Assistant acceptance",
+    )
+    ha_artifact = _load_json(ha_payload, "v5 current Home Assistant acceptance")
+    ha_root = _mapping(ha_artifact.get("home_assistant"), "v5 HA result")
+    ha_phases = _mapping(ha_root.get("phases"), "v5 HA phases")
+    ha_sut = _mapping(ha_phases.get("sut"), "v5 HA SUT")
+    ha_cases = list(_sequence(ha_sut.get("cases"), "v5 HA cases"))
+    case_bindings: list[dict[str, object]] = []
+    for value in ha_cases:
+        case = _mapping(value, "v5 HA case")
+        domux = _mapping(case.get("domux_evidence"), "v5 HA Domux evidence")
+        scenario = _mapping(
+            case.get("scenario_provenance"),
+            "v5 HA scenario provenance",
+        )
+        target_mapping = _mapping(
+            scenario.get("scenario_target_to_ha_demo_entity"),
+            "v5 HA target mapping",
+        )
+        case_bindings.append(
+            {
+                "base_id": domux.get("base_id"),
+                "variant": domux.get("variant"),
+                "v1_line_number": domux.get("line_number"),
+                "scenario_line_number": scenario.get("line_number"),
+                "scenario_target_entity_id": target_mapping.get(
+                    "scenario_target_entity_id"
+                ),
+                "ha_demo_entity_id": target_mapping.get("ha_demo_entity_id"),
+            }
+        )
+    expected_case_bindings = [
+        {
+            "base_id": "eval-duplicate_entity-01",
+            "variant": "ambiguous",
+            "v1_line_number": 2,
+            "scenario_line_number": 17,
+            "scenario_target_entity_id": "light.eval_de_01_living",
+            "ha_demo_entity_id": "light.ceiling_lights",
+        },
+        {
+            "base_id": "eval-duplicate_entity-02",
+            "variant": "clear",
+            "v1_line_number": 3,
+            "scenario_line_number": 18,
+            "scenario_target_entity_id": "cover.eval_de_02_upstairs_hall",
+            "ha_demo_entity_id": "cover.hall_window",
+        },
+        {
+            "base_id": "eval-duplicate_entity-03",
+            "variant": "clear",
+            "v1_line_number": 5,
+            "scenario_line_number": 19,
+            "scenario_target_entity_id": "climate.eval_de_03_bedroom_second",
+            "ha_demo_entity_id": "climate.hvac",
+        },
+        {
+            "base_id": "eval-duplicate_entity-04",
+            "variant": "clear",
+            "v1_line_number": 7,
+            "scenario_line_number": 20,
+            "scenario_target_entity_id": "light.eval_de_04_study",
+            "ha_demo_entity_id": "light.bed_light",
+        },
+    ]
+    _require(
+        case_bindings == expected_case_bindings,
+        "v5 Home Assistant case bindings disagree with the current artifact",
+    )
+    drift = _mapping(ha_cases[-1], "v5 HA drift case")
+    drift_binding = _mapping(drift.get("binding"), "v5 HA drift binding")
+    accounting = _mapping(
+        ha_phases.get("service_call_accounting"),
+        "v5 HA service-call accounting",
+    )
+    image = _mapping(ha_artifact.get("image"), "v5 HA image")
+    ha_execution = _mapping(
+        ha_artifact.get("execution_source_bindings"),
+        "v5 HA execution bindings",
+    )
+    expected_ha = {
+        "artifact": "evidence/ha_acceptance.json",
+        "artifact_sha256": PINNED_HA_ACCEPTANCE_SHA256,
+        "schema_version": 4,
+        "status": "passed",
+        "image": "ghcr.io/home-assistant/home-assistant:2026.8.3",
+        "recorded_v1_pair_count": 4,
+        "scenario_bound_case_count": 4,
+        "case_bindings": expected_case_bindings,
+        "successful_transitions": 3,
+        "rejected_before_dispatch": 1,
+        "sut_dispatch_total": 3,
+        "drift_sut_dispatch_delta": 0,
+        "setup_direct_rest": 5,
+        "external_fault_injection": 1,
+        "total_service_calls": 9,
+        "prepared_state_digest": (
+            "dcb0369d3d033fa784ccf60d4aa5d20d00ef1ddb458817e281687679dca574c6"
+        ),
+        "before_external_mutation_state_digest": (
+            "dcb0369d3d033fa784ccf60d4aa5d20d00ef1ddb458817e281687679dca574c6"
+        ),
+        "after_external_mutation_state_digest": (
+            "80e68977cce90ffd209341d5cdd5fb029c287f2cc719802fd12abbc6ec6a7f06"
+        ),
+        "post_clarification_model_call": False,
+        "clarification_source": "frozen_synthetic_scenario_gold",
+        "ha_registry_profile": HA_REGISTRY_PROFILE,
+        "artifact_embeds_execution_source_bindings": True,
+        "execution_binding_bundle_sha256": (
+            "9359a27e970603a1635d1c6307b5bbd651bda86a70ab6098a189c7bdce4d5fa1"
+        ),
+        "execution_binding_count": 4,
+        "execution_input_count": 2,
+        "execution_source_count": 2,
+        "module_origins_verified": True,
+        "pre_post_execution_match": True,
+        "task_resources_after": 0,
+    }
+    ha_summary = _mapping(
+        validation.get("home_assistant_acceptance"),
+        "v5 Home Assistant summary",
+    )
+    _require(ha_summary == expected_ha, "v5 Home Assistant summary changed")
+    _require(
+        _sha256(ha_payload) == ha_summary["artifact_sha256"]
+        and ha_artifact.get("schema_version") == ha_summary["schema_version"]
+        and ha_artifact.get("status") == ha_summary["status"]
+        and f"{image.get('repository')}:{image.get('version')}"
+        == ha_summary["image"]
+        and _mapping(ha_sut.get("domux_evidence"), "v5 HA Domux summary").get(
+            "pair_count"
+        )
+        == ha_summary["recorded_v1_pair_count"]
+        and _mapping(
+            ha_sut.get("scenario_evidence"),
+            "v5 HA scenario summary",
+        ).get("case_count")
+        == ha_summary["scenario_bound_case_count"]
+        and ha_sut.get("successful_transition_count")
+        == ha_summary["successful_transitions"]
+        and ha_sut.get("rejected_before_dispatch_count")
+        == ha_summary["rejected_before_dispatch"]
+        and ha_sut.get("sut_dispatch_total") == ha_summary["sut_dispatch_total"]
+        and accounting.get("setup_direct_rest") == ha_summary["setup_direct_rest"]
+        and accounting.get("external_fault_injection")
+        == ha_summary["external_fault_injection"]
+        and accounting.get("total") == ha_summary["total_service_calls"]
+        and drift_binding.get("prepared_state_digest")
+        == ha_summary["prepared_state_digest"]
+        and drift_binding.get("before_external_mutation_state_digest")
+        == ha_summary["before_external_mutation_state_digest"]
+        and drift_binding.get("after_external_mutation_state_digest")
+        == ha_summary["after_external_mutation_state_digest"]
+        and ha.get("successful_transitions")
+        == ha_summary["successful_transitions"]
+        and ha.get("rejected_before_dispatch")
+        == ha_summary["rejected_before_dispatch"]
+        and ha.get("sut_dispatch_total") == ha_summary["sut_dispatch_total"]
+        and ha.get("drift_sut_dispatch_delta")
+        == ha_summary["drift_sut_dispatch_delta"]
+        and ha.get("execution_binding_count")
+        == ha_summary["execution_binding_count"]
+        and ha.get("execution_input_count")
+        == ha_summary["execution_input_count"]
+        and ha.get("execution_source_count")
+        == ha_summary["execution_source_count"]
+        and ha.get("execution_source_bundle_sha256")
+        == ha_summary["execution_binding_bundle_sha256"]
+        and ha_execution.get("module_origins_verified")
+        == ha_summary["module_origins_verified"]
+        and ha_execution.get("pre_post_execution_match")
+        == ha_summary["pre_post_execution_match"]
+        and ha.get("total_service_calls") == ha_summary["total_service_calls"],
+        "v5 Home Assistant summary disagrees with the current artifact",
+    )
+
+    expected_diagnostic = {
+        "artifact": "evidence/diagnostics/v1_first_match.json",
+        "artifact_sha256": PINNED_V1_FIRST_MATCH_DIAGNOSTIC_SHA256,
+        "analysis_class": "post_formal_diagnostic_only",
+        "formal_arm": "B0_unique_or_abstain",
+        "diagnostic_arm": "D0_post_formal_naive_first_match",
+        "model_calls": 0,
+        "formal_metrics_changed": False,
+        "formal_protocol_changed": False,
+        "deterministic_rebuild": "passed",
+        "base_count": 48,
+        "structurally_parseable": 48,
+        "bases_with_any_sut_call": 32,
+        "formal_equivalent_dispatch_coverage": 29,
+        "exact_delta_successes": 16,
+        "wrong_target_transitions": 13,
+        "multiple_sut_calls": 3,
+        "order_sensitive_candidate_sets": 15,
+        "total_sut_calls": 35,
+    }
+    diagnostic_summary = _mapping(
+        validation.get("post_formal_diagnostic"),
+        "v5 post-formal diagnostic summary",
+    )
+    _require(
+        diagnostic_summary == expected_diagnostic,
+        "v5 post-formal diagnostic summary changed",
+    )
+    diagnostic_cross_check = {
+        key: diagnostic.get(key)
+        for key in (
+            "analysis_class",
+            "artifact_sha256",
+            "base_count",
+            "bases_with_any_sut_call",
+            "diagnostic_arm",
+            "exact_delta_successes",
+            "formal_arm",
+            "formal_equivalent_dispatch_coverage",
+            "formal_metrics_changed",
+            "formal_protocol_changed",
+            "model_calls",
+            "multiple_sut_calls",
+            "order_sensitive_candidate_sets",
+            "structurally_parseable",
+            "total_sut_calls",
+            "wrong_target_transitions",
+        )
+    }
+    _require(
+        diagnostic_cross_check
+        == {
+            key: value
+            for key, value in expected_diagnostic.items()
+            if key not in {"artifact", "deterministic_rebuild"}
+        },
+        "v5 post-formal diagnostic disagrees with its deterministic rebuild",
+    )
+
+    expected_reproductions = {
+        "v1": {
+            "command": "python reproduce_v1.py",
+            "expected_evaluator_exit_code": 1,
+            "files": {
+                "report.json": (
+                    "edea57b50e0c9ea789ca97252ada87e7064d87b8ac739c0f019519441ed2be97"
+                ),
+                "trials.jsonl": (
+                    "c7f0c97943bd49f4c21306eadeb38a69de8b063e0d821d21ee966c03ee287171"
+                ),
+            },
+            "model_rerun": False,
+            "quality_gate": "fail",
+            "result": "byte_identical",
+        },
+        "v2": {
+            "command": "python reproduce_v2.py",
+            "expected_replay_exit_code": 1,
+            "exploratory_gate": "fail",
+            "files": {
+                "manifest.json": PINNED_V2_MANIFEST_SHA256,
+                "report.json": (
+                    "b9df72353b2d20125ec75279e686e6316569dcc16b7b3db0666845a04452ebe9"
+                ),
+                "trials.jsonl": (
+                    "e7a02a537ccf88afd101172ca2bafd8d3acc077b2030dc03b8ca7b5b1bf2ef5e"
+                ),
+            },
+            "model_rerun": False,
+            "raw_outputs_reused_from_v1": True,
+            "result": "byte_identical",
+        },
+    }
+    _require(
+        _mapping(validation.get("reproduction_results"), "v5 reproductions")
+        == expected_reproductions,
+        "v5 reproduction results changed",
+    )
+
+    expected_validation_results = {
+        "artifact_verifier": {
+            "command": "PYTHONDONTWRITEBYTECODE=1 python verify_artifacts.py",
+            "result": "passed",
+        },
+        "case_full_suite": {
+            "command": (
+                "PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -q"
+            ),
+            "passed": V5_FINAL_FULL_TEST_COUNT,
+            "failed": 0,
+            "result": "passed",
+        },
+        "verifier_suite": {
+            "command": (
+                "PYTHONDONTWRITEBYTECODE=1 python -m unittest "
+                "tests/test_verify_artifacts.py -q"
+            ),
+            "passed": V5_FINAL_VERIFIER_TEST_COUNT,
+            "failed": 0,
+            "result": "passed",
+        },
+        "diff_check": {
+            "command": "git diff --check && git diff --cached --check",
+            "result": "passed",
+        },
+        "python_compile": {
+            "command": "python -m py_compile *.py tests/*.py",
+            "result": "passed",
+        },
+        "ruff": {
+            "command": (
+                "python -m ruff check clarify_commit.py diagnose_first_match_v1.py "
+                "ha_acceptance.py reproduce_v1.py reproduce_v2.py "
+                "verify_artifacts.py tests"
+            ),
+            "result": "passed",
+        },
+        "real_home_assistant_repeatability": {
+            "artifact_sha256": PINNED_HA_ACCEPTANCE_SHA256,
+            "byte_identical": True,
+            "cleanup_verified_each_run": True,
+            "execution_binding_bundle_sha256": (
+                "9359a27e970603a1635d1c6307b5bbd651bda86a70ab6098a189c7bdce4d5fa1"
+            ),
+            "observations": [
+                {
+                    "artifact_sha256": PINNED_HA_ACCEPTANCE_SHA256,
+                    "execution_binding_bundle_sha256": (
+                        "9359a27e970603a1635d1c6307b5bbd651bda86a70ab6098a189c7bdce4d5fa1"
+                    ),
+                    "run": 1,
+                    "task_resources_after": 0,
+                },
+                {
+                    "artifact_sha256": PINNED_HA_ACCEPTANCE_SHA256,
+                    "execution_binding_bundle_sha256": (
+                        "9359a27e970603a1635d1c6307b5bbd651bda86a70ab6098a189c7bdce4d5fa1"
+                    ),
+                    "run": 2,
+                    "task_resources_after": 0,
+                },
+            ],
+            "runs": 2,
+            "task_resources_after": 0,
+            "result": "passed",
+        },
+    }
+    _require(
+        _mapping(validation.get("validation_results"), "v5 validation results")
+        == expected_validation_results,
+        "v5 validation results changed",
+    )
+
+    expected_clean_room = {
+        "source_commit": V5_IMPLEMENTATION_COMMIT,
+        "scope": (
+            "implementation commit A only; excludes subsequent v5 provenance "
+            "and execution-binding closure changes"
+        ),
+        "clone_mode": "local --no-hardlinks, detached at the implementation commit",
+        "environment": "plain isolated virtual environment",
+        "python_version": "3.12.12",
+        "system_site_packages": False,
+        "dependency_install": False,
+        "network_used": False,
+        "model_runtime_requirements_installed": False,
+        "full_tests_passed": 214,
+        "verifier": "passed",
+        "v1_reproduction": "byte_identical",
+        "v2_reproduction": "byte_identical",
+        "post_formal_diagnostic_rebuild": "passed",
+        "pip_check": {
+            "result": "passed",
+            "scope": (
+                "isolated standard-library replay/test environment only; does "
+                "not validate the BF16 model/runtime stack"
+            ),
+        },
+        "worktree_clean": True,
+        "temporary_directory_removed": True,
+    }
+    _require(
+        _mapping(validation.get("clean_room"), "v5 clean-room result")
+        == expected_clean_room,
+        "v5 clean-room result changed",
+    )
+
+    largest_path, largest_payload = max(
+        bound_payloads.items(),
+        key=lambda item: (len(item[1]), item[0]),
+    )
+    expected_hygiene = {
+        "result": "passed",
+        "scope": "all files declared by the v5 source-binding groups",
+        "source": "source_bindings_hash_and_size_verification",
+        "binding_group_count": len(V5_SOURCE_GROUPS),
+        "bound_file_count": len(bound_paths),
+        "duplicate_bound_paths": 0,
+        "missing_bound_files": 0,
+        "largest_bound_file": {
+            "path": largest_path,
+            "size_bytes": len(largest_payload),
+        },
+        "bound_files_over_5_mib": sum(
+            len(source) > 5 * 1024 * 1024 for source in bound_payloads.values()
+        ),
+        "manifest_self_bound": False,
+        "absolute_paths": sum(Path(path).is_absolute() for path in bound_paths),
+        "secret_scanner_claimed": False,
+    }
+    _require(
+        _mapping(validation.get("repository_hygiene"), "v5 repository hygiene")
+        == expected_hygiene,
+        "v5 repository-hygiene result changed",
+    )
+
+    expected_review = {
+        "method": (
+            "three isolated AI-assisted read-only reviews plus one post-fix "
+            "AI-assisted read-only re-review, followed by main-agent verification"
+        ),
+        "review_passes": 4,
+        "unresolved_blockers": 0,
+        "unresolved_major_findings": 0,
+        "scopes": [
+            "historical-record classification, correction semantics, and trust design",
+            "strict source-binding schema, diffs, previews, privacy, and test closure",
+            "adversarial HA source attribution, repeatability, and squash wording",
+            "post-fix schema-4 HA/tree/v5 cross-binding regression closure",
+        ],
+    }
+    _require(
+        _mapping(validation.get("independent_review"), "v5 independent review")
+        == expected_review,
+        "v5 independent-review result changed",
+    )
+
+    expected_non_claims = [
+        (
+            "v1 remains the sole formal pre-remediation model evaluation; its "
+            "quality gate failed, and v5 does not change that result."
+        ),
+        (
+            "v2 reused v1 raw outputs and remains a post-formal, non-held-out, "
+            "non-confirmatory exploratory replay whose gate failed."
+        ),
+        (
+            "v3 and v4 remain immutable historical records; verifying their "
+            "bytes does not make every historical narrative a current claim."
+        ),
+        "v4's Home Assistant provenance narrative is superseded by v5.",
+        (
+            "The current Home Assistant acceptance is not an uninterrupted live "
+            "model-to-Home-Assistant run and made no new model calls."
+        ),
+        (
+            "Clarification answers and confirmed instructions came from frozen "
+            "synthetic scenario gold; there was no post-clarification model call."
+        ),
+        (
+            "The Home Assistant registry is a declared semantic target-mapping "
+            "subset, not the full frozen scenario inventory."
+        ),
+        (
+            "The current acceptance contains three committed transitions and one "
+            "pre-dispatch rejection; setup, fault injection, and SUT dispatches "
+            "are accounted for separately."
+        ),
+        (
+            "D0 first-match is post-formal diagnostic evidence only; formal B0 "
+            "remains B0_unique_or_abstain."
+        ),
+        (
+            "The validated status and suite sizes mean only evidence integrity "
+            "and current claim semantics passed verification; they do not change "
+            "the failed v1/v2 gates, estimate production prevalence, or certify "
+            "production safety."
+        ),
+        (
+            "Runtime source/input bindings provide content attribution and drift "
+            "detection, not cryptographic proof that every recorded effect was "
+            "caused by those bytes."
+        ),
+        "The preview is an explanatory infographic, not a terminal screenshot.",
+    ]
+    _require(
+        list(_sequence(validation.get("non_claims"), "v5 non-claims"))
+        == expected_non_claims,
+        "v5 non-claim set changed",
+    )
+    return {
+        "artifact_status": "current_closure_verified",
+        "current_claim_status": "authoritative_current_closure",
+        "evidence_version": (
+            "v5-provenance-correction-and-current-acceptance-closure"
+        ),
+        "implementation_commit": V5_IMPLEMENTATION_COMMIT,
+        "binding_groups": len(V5_SOURCE_GROUPS),
+        "bound_files": len(bound_paths),
+        "final_tests": V5_FINAL_FULL_TEST_COUNT,
+        "verifier_tests": V5_FINAL_VERIFIER_TEST_COUNT,
+        "status_scope": V5_STATUS_SCOPE,
     }
 
 
@@ -3346,13 +4370,24 @@ def verify_all(case_dir: Path = CASE_DIR) -> dict[str, object]:
     ha = _verify_ha(case_dir)
     v3 = _verify_v3(case_dir)
     v4 = _verify_v4(case_dir)
+    v5 = _verify_v5(
+        case_dir,
+        v1=v1,
+        diagnostic=diagnostic,
+        v2=v2,
+        v3=v3,
+        v4=v4,
+        ha=ha,
+    )
     return {
         "status": "verified",
+        "status_scope": V5_STATUS_SCOPE,
         "v1": v1,
         "post_formal_diagnostic": diagnostic,
         "v2": v2,
         "v3": v3,
         "v4": v4,
+        "v5": v5,
         "home_assistant": ha,
     }
 

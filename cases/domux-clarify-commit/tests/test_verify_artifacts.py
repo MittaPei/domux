@@ -46,6 +46,10 @@ class ArtifactVerifierTests(unittest.TestCase):
     def test_default_verification_covers_all_evidence_sets(self) -> None:
         result = verify_artifacts.verify_all()
         self.assertEqual(result["status"], "verified")
+        self.assertEqual(
+            result["status_scope"],
+            "evidence_integrity_and_current_claim_semantics_only",
+        )
         self.assertEqual(result["v1"]["raw_probes"], 96)
         self.assertEqual(result["v1"]["trial_records"], 936)
         self.assertTrue(result["v1"]["formal_headline"])
@@ -69,14 +73,34 @@ class ArtifactVerifierTests(unittest.TestCase):
         self.assertEqual(result["v4"]["ha_tests"], 13)
         self.assertEqual(result["v4"]["full_tests"], 188)
         self.assertEqual(result["v4"]["clean_room_tests"], 188)
+        self.assertEqual(
+            result["v4"]["artifact_status"],
+            "historical_bytes_verified",
+        )
+        self.assertEqual(
+            result["v4"]["current_claim_status"],
+            "superseded_by_v5",
+        )
         self.assertFalse(result["v4"]["model_rerun"])
         self.assertFalse(result["v4"]["official_v2_replay"])
+        self.assertEqual(result["v5"]["artifact_status"], "current_closure_verified")
+        self.assertEqual(
+            result["v5"]["current_claim_status"],
+            "authoritative_current_closure",
+        )
+        self.assertEqual(result["v5"]["binding_groups"], 8)
+        self.assertEqual(result["v5"]["bound_files"], 27)
+        self.assertEqual(result["v5"]["final_tests"], 221)
+        self.assertEqual(result["v5"]["verifier_tests"], 31)
         self.assertEqual(result["home_assistant"]["sut_cases"], 4)
         self.assertEqual(result["home_assistant"]["successful_transitions"], 3)
         self.assertEqual(result["home_assistant"]["rejected_before_dispatch"], 1)
         self.assertEqual(result["home_assistant"]["sut_dispatch_total"], 3)
         self.assertEqual(result["home_assistant"]["drift_sut_dispatch_delta"], 0)
         self.assertEqual(result["home_assistant"]["domux_evidence_pairs"], 4)
+        self.assertEqual(result["home_assistant"]["execution_binding_count"], 4)
+        self.assertEqual(result["home_assistant"]["execution_source_count"], 2)
+        self.assertEqual(result["home_assistant"]["execution_input_count"], 2)
         self.assertEqual(result["home_assistant"]["total_service_calls"], 9)
 
     def test_cli_default_success_is_machine_readable(self) -> None:
@@ -410,6 +434,39 @@ class ArtifactVerifierTests(unittest.TestCase):
 
         mutations = (
             (
+                "outer schema",
+                lambda artifact: artifact.update({"schema_version": 3}),
+                "HA acceptance did not pass",
+            ),
+            (
+                "execution pre/post match",
+                lambda artifact: artifact["execution_source_bindings"].update(
+                    {"pre_post_execution_match": False}
+                ),
+                "HA execution provenance contract changed",
+            ),
+            (
+                "execution source hash",
+                lambda artifact: artifact["execution_source_bindings"]["sources"][
+                    "ha_acceptance.py"
+                ].update({"sha256": "0" * 64}),
+                "HA execution source ha_acceptance.py hash mismatch",
+            ),
+            (
+                "execution input hash",
+                lambda artifact: artifact["execution_source_bindings"]["inputs"][
+                    "data/scenarios.jsonl"
+                ].update({"sha256": "0" * 64}),
+                "HA execution input data/scenarios.jsonl hash mismatch",
+            ),
+            (
+                "execution binding extra field",
+                lambda artifact: artifact["execution_source_bindings"]["sources"][
+                    "clarify_commit.py"
+                ].update({"unverified_claim": True}),
+                "HA execution source clarify_commit.py binding fields changed",
+            ),
+            (
                 "readiness",
                 lambda artifact: artifact["home_assistant"]["readiness"].update(
                     {"endpoint": "/api/"}
@@ -555,6 +612,19 @@ class ArtifactVerifierTests(unittest.TestCase):
                 sut["domux_evidence"]["artifact_sha256"] = raw_sha256
                 for case in sut["cases"]:
                     case["domux_evidence"]["artifact_sha256"] = raw_sha256
+                execution = ha["execution_source_bindings"]
+                execution["inputs"]["evidence/v1/domux_raw.jsonl"] = {
+                    "sha256": raw_sha256,
+                    "size_bytes": len(payload),
+                }
+                execution["binding_bundle_sha256"] = hashlib.sha256(
+                    verify_artifacts.canonical_json(
+                        {
+                            "inputs": execution["inputs"],
+                            "sources": execution["sources"],
+                        }
+                    ).encode("utf-8")
+                ).hexdigest()
                 ha_payload = (
                     json.dumps(ha, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
                 ).encode("utf-8")
@@ -580,7 +650,10 @@ class ArtifactVerifierTests(unittest.TestCase):
             )
             current = copied / "evidence" / "ha_acceptance.json"
             current.write_bytes(current.read_bytes() + b"\n")
-            self.assertEqual(verify_artifacts._verify_v4(copied)["status"], "verified")
+            self.assertEqual(
+                verify_artifacts._verify_v4(copied)["artifact_status"],
+                "historical_bytes_verified",
+            )
 
             archived = copied / "evidence" / "v4" / "ha_acceptance.json"
             archived.write_bytes(archived.read_bytes() + b"\n")
@@ -658,7 +731,10 @@ class ArtifactVerifierTests(unittest.TestCase):
             for relative in verify_artifacts.V4_ARCHIVED_SOURCE_PATHS:
                 source = copied / relative
                 source.write_bytes(source.read_bytes() + b"\n")
-            self.assertEqual(verify_artifacts._verify_v4(copied)["status"], "verified")
+            self.assertEqual(
+                verify_artifacts._verify_v4(copied)["current_claim_status"],
+                "superseded_by_v5",
+            )
 
         for relative in verify_artifacts.V4_SOURCE_FILES:
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
@@ -678,6 +754,229 @@ class ArtifactVerifierTests(unittest.TestCase):
                     f"v4 source {relative} hash mismatch",
                 ):
                     verify_artifacts._verify_v4(copied)
+
+    def test_v5_rejects_semantic_correction_and_record_status_tampering(self) -> None:
+        mutations = (
+            (
+                "analysis",
+                lambda artifact: artifact["analysis_classification"].update(
+                    {"formal": True}
+                ),
+                "v5 analysis classification changed",
+            ),
+            (
+                "record status",
+                lambda artifact: artifact["record_classification"]["v4"].update(
+                    {"current_claim_status": "historical"}
+                ),
+                "v5 record classification changed",
+            ),
+            (
+                "correction",
+                lambda artifact: artifact["corrections"][0].update(
+                    {"historical_record_bytes_mutated": True}
+                ),
+                "v5 correction changed",
+            ),
+            (
+                "source path set",
+                lambda artifact: artifact["source_bindings"]["presentation"].pop(
+                    "preview.png"
+                ),
+                "v5 presentation source-binding set changed",
+            ),
+            (
+                "source binding extra field",
+                lambda artifact: artifact["source_bindings"]["presentation"][
+                    "preview.svg"
+                ].__setitem__("unverified_claim", "cryptographically_signed"),
+                "v5 source preview.svg binding fields changed",
+            ),
+        )
+        for name, mutate, expected_error in mutations:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                manifest = copied / "evidence" / "v5" / "validation.json"
+                artifact = json.loads(manifest.read_text(encoding="utf-8"))
+                mutate(artifact)
+                manifest.write_text(
+                    json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(VerificationError, expected_error):
+                    verify_artifacts.verify_all(copied)
+
+    def test_v5_rejects_current_source_and_preview_tampering(self) -> None:
+        for relative in ("verify_artifacts.py", "preview.svg", "preview.png"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                source = copied / relative
+                source.write_bytes(source.read_bytes() + b"\n")
+                with self.assertRaisesRegex(
+                    VerificationError,
+                    f"v5 source {relative} hash mismatch",
+                ):
+                    verify_artifacts.verify_all(copied)
+
+    def test_v5_repin_cannot_misattribute_an_old_ha_run_to_new_sources(self) -> None:
+        for relative in ("ha_acceptance.py", "clarify_commit.py"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                source = copied / relative
+                source.write_bytes(source.read_bytes() + b"\n# synthetic source change\n")
+
+                manifest = copied / "evidence" / "v5" / "validation.json"
+                artifact = json.loads(manifest.read_text(encoding="utf-8"))
+                group_name = (
+                    "current_home_assistant"
+                    if relative == "ha_acceptance.py"
+                    else "current_policy"
+                )
+                artifact["source_bindings"][group_name][relative] = {
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "size_bytes": source.stat().st_size,
+                }
+                manifest.write_text(
+                    json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    VerificationError,
+                    f"HA execution source {relative} hash mismatch",
+                ):
+                    verify_artifacts.verify_all(copied)
+
+    def test_v5_rejects_archived_v4_preview_tampering(self) -> None:
+        verified = verify_artifacts.verify_all()
+        for relative in (
+            "evidence/v4/presentation/preview.svg",
+            "evidence/v4/presentation/preview.png",
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                source = copied / relative
+                source.write_bytes(source.read_bytes() + b"\n")
+                with self.assertRaisesRegex(
+                    VerificationError,
+                    f"v5 source {relative} hash mismatch",
+                ):
+                    verify_artifacts._verify_v5(
+                        copied,
+                        v1=verified["v1"],
+                        diagnostic=verified["post_formal_diagnostic"],
+                        v2=verified["v2"],
+                        v3=verified["v3"],
+                        v4=verified["v4"],
+                        ha=verified["home_assistant"],
+                    )
+
+    def test_v5_rejects_circular_or_signature_trust_claims(self) -> None:
+        forbidden_name = "PINNED_V5_" + "VALIDATION_SHA256"
+        self.assertFalse(hasattr(verify_artifacts, forbidden_name))
+        self.assertNotIn(
+            forbidden_name,
+            (CASE_DIR / "verify_artifacts.py").read_text(encoding="utf-8"),
+        )
+        mutations = (
+            {"outer_root_sha_embedded": True},
+            {"manifest_self_hash_embedded": True},
+            {"verifier_hardcodes_v5_manifest_sha256": True},
+            {"cryptographic_commit_signature_claimed": True},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                manifest = copied / "evidence" / "v5" / "validation.json"
+                artifact = json.loads(manifest.read_text(encoding="utf-8"))
+                artifact["trust_model"].update(mutation)
+                manifest.write_text(
+                    json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    VerificationError,
+                    "v5 trust model or circularity declaration changed",
+                ):
+                    verify_artifacts.verify_all(copied)
+
+    def test_v5_cross_checks_home_assistant_and_diagnostic_summaries(self) -> None:
+        mutations = (
+            (
+                "HA artifact digest",
+                lambda artifact: artifact["home_assistant_acceptance"].update(
+                    {"artifact_sha256": "0" * 64}
+                ),
+                "v5 Home Assistant summary changed",
+            ),
+            (
+                "HA source line",
+                lambda artifact: artifact["home_assistant_acceptance"][
+                    "case_bindings"
+                ][0].update({"scenario_line_number": 18}),
+                "v5 Home Assistant summary changed",
+            ),
+            (
+                "diagnostic formal arm",
+                lambda artifact: artifact["post_formal_diagnostic"].update(
+                    {"formal_arm": "D0_post_formal_naive_first_match"}
+                ),
+                "v5 post-formal diagnostic summary changed",
+            ),
+            (
+                "diagnostic calls",
+                lambda artifact: artifact["post_formal_diagnostic"].update(
+                    {"total_sut_calls": 34}
+                ),
+                "v5 post-formal diagnostic summary changed",
+            ),
+        )
+        for name, mutate, expected_error in mutations:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                copied = Path(temporary) / "case"
+                shutil.copytree(
+                    CASE_DIR,
+                    copied,
+                    ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"),
+                )
+                manifest = copied / "evidence" / "v5" / "validation.json"
+                artifact = json.loads(manifest.read_text(encoding="utf-8"))
+                mutate(artifact)
+                manifest.write_text(
+                    json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(VerificationError, expected_error):
+                    verify_artifacts.verify_all(copied)
 
 
 if __name__ == "__main__":

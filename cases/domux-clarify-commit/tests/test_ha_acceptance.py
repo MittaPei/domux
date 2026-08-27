@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import contextlib
+import hashlib
 import io
 import json
 import stat
@@ -1173,7 +1175,65 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(successful.cleaned)
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["schema_version"], 3)
+        self.assertEqual(result["schema_version"], 4)
+        provenance = result["execution_source_bindings"]
+        self.assertEqual(
+            set(provenance),
+            {
+                "binding_bundle_sha256",
+                "digest_algorithm",
+                "host_python",
+                "inputs",
+                "module_origins_verified",
+                "path_base",
+                "pre_post_execution_match",
+                "schema_version",
+                "sources",
+            },
+        )
+        self.assertEqual(provenance["schema_version"], 1)
+        self.assertEqual(provenance["digest_algorithm"], "sha256")
+        self.assertEqual(provenance["path_base"], "case_directory")
+        self.assertTrue(provenance["module_origins_verified"])
+        self.assertTrue(provenance["pre_post_execution_match"])
+        self.assertEqual(
+            provenance["host_python"],
+            {
+                "implementation": sys.implementation.name,
+                "version": ".".join(str(value) for value in sys.version_info[:3]),
+            },
+        )
+        self.assertEqual(
+            set(provenance["sources"]),
+            set(ha.EXECUTION_SOURCE_PATHS),
+        )
+        self.assertEqual(
+            set(provenance["inputs"]),
+            set(ha.EXECUTION_INPUT_PATHS),
+        )
+        for group, paths in (
+            ("inputs", ha.EXECUTION_INPUT_PATHS),
+            ("sources", ha.EXECUTION_SOURCE_PATHS),
+        ):
+            for relative in paths:
+                payload = (ha.CASE_DIR / relative).read_bytes()
+                self.assertEqual(
+                    provenance[group][relative],
+                    {
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "size_bytes": len(payload),
+                    },
+                )
+        bundle_payload = json.dumps(
+            {"inputs": provenance["inputs"], "sources": provenance["sources"]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        self.assertEqual(
+            provenance["binding_bundle_sha256"],
+            hashlib.sha256(bundle_payload).hexdigest(),
+        )
 
         failing = FakeDockerRuntime(fail=True)
         with self.assertRaisesRegex(ha.AcceptanceError, "prepare failure"):
@@ -1226,6 +1286,32 @@ class HomeAssistantWorkflowTests(unittest.TestCase):
             }],
         )
         self.assertNotIn("synthetic-access-secret", json.dumps(api.direct_service_calls))
+
+    def test_execute_rejects_execution_file_drift_and_still_cleans(self) -> None:
+        before = ha.capture_execution_bindings()
+        after = copy.deepcopy(before)
+        after["sources"]["ha_acceptance.py"]["sha256"] = "0" * 64
+        runtime = FakeDockerRuntime()
+        backend = FakeRestBackend()
+
+        with mock.patch.object(
+            ha,
+            "capture_execution_bindings",
+            side_effect=(before, after),
+        ), self.assertRaisesRegex(
+            ha.AcceptanceError,
+            "execution sources or inputs changed during acceptance",
+        ):
+            ha.execute_acceptance(
+                runtime,
+                api_factory=lambda base_url: FakeHomeAssistantApi(base_url, backend),
+                credential_factory=lambda: (
+                    "synthetic-user",
+                    "synthetic-password",
+                ),
+                rest_adapter_factory=backend.adapter,
+            )
+        self.assertTrue(runtime.cleaned)
 
     def test_http_transport_failure_does_not_echo_url_or_bearer(self) -> None:
         def failing_opener(*_args: Any, **_kwargs: Any) -> Any:
